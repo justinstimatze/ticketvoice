@@ -11,11 +11,9 @@
 // Two sibling tools watch the same Linear writes — basanite (vocabulary tics) and cope (voicing and
 // structure) — and both, independently, chose never to block on their own: additionalContext only.
 // Word count alone left a real hole: a within-budget ticket carrying a flagged tic shipped with
-// nobody forced to look. This hook now closes half of it by calling cope directly, forwarding the
-// exact bytes it received to cope-gate -pretool and gating on its verdict too, not just the budget —
-// see judgeCope. Basanite isn't wired in the same way yet: its writecheck dedupes against a
-// per-session seen-set on disk, and calling it from here as well as from its own registered hook
-// would race two callers against the same state file for the same call. See CHANGELOG.md.
+// nobody forced to look. This hook closes it by calling both directly, forwarding the exact bytes
+// it received to cope-gate -pretool and basanite writecheck -no-dedup and gating on their verdicts
+// too, not just the budget — see judgeCope and judgeBasanite. See CHANGELOG.md.
 package main
 
 import (
@@ -192,34 +190,30 @@ type judgment struct {
 	note    string
 }
 
-// copeGatePath resolves the cope-gate binary: TICKETVOICE_COPE_GATE overrides, otherwise PATH.
-// Empty means unreachable, not an error — judgeCope treats the two the same.
-func copeGatePath() string {
-	if v := os.Getenv("TICKETVOICE_COPE_GATE"); v != "" {
+// binPath resolves a sibling's binary: the env var overrides, otherwise PATH. Empty means
+// unreachable, not an error — judgeSibling treats the two the same.
+func binPath(envVar, name string) string {
+	if v := os.Getenv(envVar); v != "" {
 		return v
 	}
-	p, _ := exec.LookPath("cope-gate")
+	p, _ := exec.LookPath(name)
 	return p
 }
 
-// judgeCope runs cope's own PreToolUse entry on the exact bytes this hook received — not a
-// reimplementation of its scoring, the same binary. cope-gate -pretool writes no session state (its
-// own pretool.go says so: "Per-write feedback repeats. That is the correct amount."), so running it
-// a second time here alongside cope's own registered hook is safe — both score the same text
-// independently and land on the same answer, unlike basanite's writecheck, which dedupes against a
-// per-session seen-set on disk and would give the two callers different answers for the same call.
-// See CHANGELOG.md for that half.
+// judgeSibling runs a sibling's own PreToolUse-shaped entry on the exact bytes this hook
+// received — not a reimplementation of its scoring, the same binary, same input, called directly.
+// Both cope-gate -pretool and basanite writecheck -no-dedup answer in the same shape
+// (hookSpecificOutput.additionalContext), which is what makes one caller here work for both.
 //
-// Fails open in every direction, matching cope's own stated posture for this entry: a missing
-// binary, a timeout, or output that doesn't parse all mean "cope found nothing," never "block."
-func judgeCope(rawStdin []byte) judgment {
-	bin := copeGatePath()
+// Fails open in every direction: a missing binary, a timeout, or output that doesn't parse all mean
+// "this sibling found nothing," never "block."
+func judgeSibling(bin string, args []string, rawStdin []byte) judgment {
 	if bin == "" {
 		return judgment{}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, bin, "-pretool")
+	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Stdin = bytes.NewReader(rawStdin)
 	out, err := cmd.Output()
 	if err != nil {
@@ -237,8 +231,22 @@ func judgeCope(rawStdin []byte) judgment {
 	return judgment{flagged: note != "", note: note}
 }
 
+// judgeCope calls cope-gate -pretool. It writes no session state (pretool.go: "Per-write feedback
+// repeats. That is the correct amount."), so a second caller here alongside cope's own registered
+// hook lands on the same answer independently — no race.
+func judgeCope(rawStdin []byte) judgment {
+	return judgeSibling(binPath("TICKETVOICE_COPE_GATE", "cope-gate"), []string{"-pretool"}, rawStdin)
+}
+
+// judgeBasanite calls basanite writecheck -no-dedup — the flag basanite added specifically for
+// this caller (see CHANGELOG.md), because the plain writecheck path dedupes against a per-session
+// seen-set file that a second, independent caller would otherwise race.
+func judgeBasanite(rawStdin []byte) judgment {
+	return judgeSibling(binPath("TICKETVOICE_BASANITE", "basanite"), []string{"writecheck", "-no-dedup"}, rawStdin)
+}
+
 // runHookWithInput is the hook's decision logic, taking the raw bytes so the same bytes can be
-// forwarded to cope-gate unmodified and so this runs without a subprocess in tests. Returns nil
+// forwarded to the siblings unmodified and so this runs without a subprocess in tests. Returns nil
 // when the call should proceed silently.
 func runHookWithInput(raw []byte) *hookOutput {
 	var in hookInput
@@ -246,22 +254,33 @@ func runHookWithInput(raw []byte) *hookOutput {
 	if json.Unmarshal(raw, &in) != nil {
 		return nil
 	}
-	text, budget, kind := prose(in.ToolName, in.ToolInput)
+	text, rawBudget, kind := prose(in.ToolName, in.ToolInput)
 	if text == "" {
 		return nil
 	}
-	over, reason := evaluate(text, kind, budgetFor(budget))
+	budget := budgetFor(rawBudget)
+	over, budgetReason := evaluate(text, kind, budget)
+
 	cope := judgeCope(raw)
-	if !over && !cope.flagged {
+	basanite := judgeBasanite(raw)
+	if !over && !cope.flagged && !basanite.flagged {
 		return nil
 	}
 
-	switch {
-	case over && cope.flagged:
-		reason += fmt.Sprintf("\n\ncope also flagged this on the way out:\n\n%s", cope.note)
-	case !over:
-		reason = fmt.Sprintf("This %s is inside the %d-word budget, but cope flagged it on the way out:\n\n%s\n\nCut it and call again, or approve to send as written.",
-			kind, budget, cope.note)
+	var reason string
+	if over {
+		reason = budgetReason
+	} else {
+		reason = fmt.Sprintf("This %s is inside the %d-word budget, but a sibling scorer flagged it on the way out.", kind, budget)
+	}
+	if cope.flagged {
+		reason += fmt.Sprintf("\n\ncope flagged this:\n\n%s", cope.note)
+	}
+	if basanite.flagged {
+		reason += fmt.Sprintf("\n\nbasanite flagged this:\n\n%s", basanite.note)
+	}
+	if !over {
+		reason += "\n\nCut it and call again, or approve to send as written."
 	}
 
 	var out hookOutput

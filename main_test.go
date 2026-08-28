@@ -75,13 +75,14 @@ func TestEvaluateMatchesBudget(t *testing.T) {
 	}
 }
 
-// fakeCopeGate writes a stand-in cope-gate binary that answers -pretool the way the real one does,
-// so the subprocess boundary is real but the test doesn't need cope built. additionalContext == ""
-// reproduces a clean run (cope prints nothing at all — see pretool.go's "if b.Len() == 0 { return }").
-func fakeCopeGate(t *testing.T, additionalContext string) string {
+// fakeSiblingBinary writes a stand-in for cope-gate or basanite that answers the way the real one
+// does — the same hookSpecificOutput.additionalContext shape both use — so the subprocess boundary
+// is real but the test doesn't need either sibling built. additionalContext == "" reproduces a
+// clean run (both siblings print nothing at all on a clean score).
+func fakeSiblingBinary(t *testing.T, name, additionalContext string) string {
 	t.Helper()
 	dir := t.TempDir()
-	script := filepath.Join(dir, "cope-gate")
+	script := filepath.Join(dir, name)
 	body := "#!/bin/sh\n"
 	if additionalContext != "" {
 		var resp struct {
@@ -108,6 +109,15 @@ func fakeCopeGate(t *testing.T, additionalContext string) string {
 	return script
 }
 
+// clean stubs both siblings to a clean run, so a test exercising one flagged sibling isn't
+// contaminated by whatever cope-gate/basanite happen to be installed (or not) on the machine
+// running the test.
+func clean(t *testing.T) {
+	t.Helper()
+	t.Setenv("TICKETVOICE_COPE_GATE", fakeSiblingBinary(t, "cope-gate", ""))
+	t.Setenv("TICKETVOICE_BASANITE", fakeSiblingBinary(t, "basanite", ""))
+}
+
 func TestJudgeCopeMissingBinaryFailsOpen(t *testing.T) {
 	t.Setenv("TICKETVOICE_COPE_GATE", filepath.Join(t.TempDir(), "does-not-exist"))
 	if j := judgeCope([]byte(`{}`)); j.flagged {
@@ -116,7 +126,7 @@ func TestJudgeCopeMissingBinaryFailsOpen(t *testing.T) {
 }
 
 func TestJudgeCopeParsesFlaggedOutput(t *testing.T) {
-	t.Setenv("TICKETVOICE_COPE_GATE", fakeCopeGate(t, "clause_symmetry: 1 violation(s)"))
+	t.Setenv("TICKETVOICE_COPE_GATE", fakeSiblingBinary(t, "cope-gate", "clause_symmetry: 1 violation(s)"))
 	j := judgeCope([]byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"x"}}`))
 	if !j.flagged || j.note != "clause_symmetry: 1 violation(s)" {
 		t.Fatalf("want flagged with cope's note, got %+v", j)
@@ -124,8 +134,30 @@ func TestJudgeCopeParsesFlaggedOutput(t *testing.T) {
 }
 
 func TestJudgeCopeCleanOutputNotFlagged(t *testing.T) {
-	t.Setenv("TICKETVOICE_COPE_GATE", fakeCopeGate(t, ""))
+	t.Setenv("TICKETVOICE_COPE_GATE", fakeSiblingBinary(t, "cope-gate", ""))
 	if j := judgeCope([]byte(`{}`)); j.flagged {
+		t.Fatalf("clean run must not flag, got %+v", j)
+	}
+}
+
+func TestJudgeBasaniteMissingBinaryFailsOpen(t *testing.T) {
+	t.Setenv("TICKETVOICE_BASANITE", filepath.Join(t.TempDir(), "does-not-exist"))
+	if j := judgeBasanite([]byte(`{}`)); j.flagged {
+		t.Fatalf("missing binary must fail open, got %+v", j)
+	}
+}
+
+func TestJudgeBasaniteParsesFlaggedOutput(t *testing.T) {
+	t.Setenv("TICKETVOICE_BASANITE", fakeSiblingBinary(t, "basanite", "load-bearing ×1 → supporting"))
+	j := judgeBasanite([]byte(`{"session_id":"s","tool_input":{"description":"x"}}`))
+	if !j.flagged || j.note != "load-bearing ×1 → supporting" {
+		t.Fatalf("want flagged with basanite's note, got %+v", j)
+	}
+}
+
+func TestJudgeBasaniteCleanOutputNotFlagged(t *testing.T) {
+	t.Setenv("TICKETVOICE_BASANITE", fakeSiblingBinary(t, "basanite", ""))
+	if j := judgeBasanite([]byte(`{}`)); j.flagged {
 		t.Fatalf("clean run must not flag, got %+v", j)
 	}
 }
@@ -133,7 +165,8 @@ func TestJudgeCopeCleanOutputNotFlagged(t *testing.T) {
 // The gap this closes: a within-budget ticket carrying a flagged tic used to ship with nobody
 // forced to look. This is the test that would have caught it staying open.
 func TestRunHookAsksWhenCopeFlagsAnUnderBudgetTicket(t *testing.T) {
-	t.Setenv("TICKETVOICE_COPE_GATE", fakeCopeGate(t, "dangling_end: 1 violation(s)"))
+	clean(t)
+	t.Setenv("TICKETVOICE_COPE_GATE", fakeSiblingBinary(t, "cope-gate", "dangling_end: 1 violation(s)"))
 	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + words(20) + `"}}`)
 	out := runHookWithInput(raw)
 	if out == nil {
@@ -147,24 +180,43 @@ func TestRunHookAsksWhenCopeFlagsAnUnderBudgetTicket(t *testing.T) {
 	}
 }
 
-func TestRunHookSilentWhenBothClean(t *testing.T) {
-	t.Setenv("TICKETVOICE_COPE_GATE", fakeCopeGate(t, ""))
+func TestRunHookAsksWhenBasaniteFlagsAnUnderBudgetTicket(t *testing.T) {
+	clean(t)
+	t.Setenv("TICKETVOICE_BASANITE", fakeSiblingBinary(t, "basanite", "load-bearing ×1 → supporting"))
+	raw := []byte(`{"session_id":"s","tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + words(20) + `"}}`)
+	out := runHookWithInput(raw)
+	if out == nil {
+		t.Fatal("basanite-flagged, under-budget ticket must still ask")
+	}
+	if out.HookSpecificOutput.PermissionDecision != "ask" {
+		t.Fatalf("want ask, got %q", out.HookSpecificOutput.PermissionDecision)
+	}
+	if !strings.Contains(out.HookSpecificOutput.PermissionDecisionReason, "load-bearing") {
+		t.Fatalf("reason must carry basanite's finding: %q", out.HookSpecificOutput.PermissionDecisionReason)
+	}
+}
+
+func TestRunHookSilentWhenAllClean(t *testing.T) {
+	clean(t)
 	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + words(20) + `"}}`)
 	if out := runHookWithInput(raw); out != nil {
 		t.Fatalf("under budget and clean must stay silent, got %+v", out)
 	}
 }
 
-func TestRunHookReasonCarriesBothFindingsWhenOverBudgetAndFlagged(t *testing.T) {
-	t.Setenv("TICKETVOICE_COPE_GATE", fakeCopeGate(t, "forked_end: 1 violation(s)"))
+// The three-way case: over budget and both siblings flag it. Nothing gets dropped picking a
+// reason to show.
+func TestRunHookReasonCarriesAllThreeFindingsWhenOverBudgetAndBothFlag(t *testing.T) {
+	t.Setenv("TICKETVOICE_COPE_GATE", fakeSiblingBinary(t, "cope-gate", "forked_end: 1 violation(s)"))
+	t.Setenv("TICKETVOICE_BASANITE", fakeSiblingBinary(t, "basanite", "load-bearing ×1 → supporting"))
 	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + words(200) + `"}}`)
 	out := runHookWithInput(raw)
 	if out == nil {
 		t.Fatal("over-budget ticket must ask")
 	}
-	if !strings.Contains(out.HookSpecificOutput.PermissionDecisionReason, "200 words") ||
-		!strings.Contains(out.HookSpecificOutput.PermissionDecisionReason, "forked_end") {
-		t.Fatalf("reason must carry both the word count and cope's finding: %q", out.HookSpecificOutput.PermissionDecisionReason)
+	reason := out.HookSpecificOutput.PermissionDecisionReason
+	if !strings.Contains(reason, "200 words") || !strings.Contains(reason, "forked_end") || !strings.Contains(reason, "load-bearing") {
+		t.Fatalf("reason must carry the word count and both siblings' findings: %q", reason)
 	}
 }
 

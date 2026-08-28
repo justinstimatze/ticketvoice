@@ -63,8 +63,9 @@ There's no installer subcommand — this is a plain hook binary, wired by hand o
 `TICKETVOICE_MAX_WORDS` overrides the budget for the current call — issue or comment. Set it in the
 hook's environment: `TICKETVOICE_MAX_WORDS=200`.
 
-`TICKETVOICE_COPE_GATE` points at the `cope-gate` binary if it isn't on `PATH`. Missing or
-unreachable is not an error — the call just isn't scored against cope's rules that time.
+`TICKETVOICE_COPE_GATE` and `TICKETVOICE_BASANITE` point at those binaries if they aren't on `PATH`.
+Missing or unreachable is not an error for either — the call just isn't scored against that sibling's
+rules that time.
 
 ## What it counts
 
@@ -78,11 +79,10 @@ reason: headers cost two lines each and imply more document than there is.
 Two other tools watch the same Linear writes — [basanite](https://github.com/justinstimatze/basanite)
 for vocabulary tics, [cope](https://github.com/justinstimatze/cope) for voicing and structure — and
 neither blocks on its own: `additionalContext`, after the call already went out. Ticketvoice does
-block, and as of this version it isn't judging on word count alone: it forwards its own stdin to
-`cope-gate -pretool` directly and asks on cope's verdict too, so a within-budget ticket carrying a
-flagged tic gets held for a human the same as an over-length one. Basanite isn't wired in yet — its
-dedup state makes a second caller unsafe; see [CHANGELOG.md](CHANGELOG.md) for the reason and what
-would fix it.
+block, and it isn't judging on word count alone: it forwards its own stdin to `cope-gate -pretool`
+and `basanite writecheck -no-dedup` directly and asks on either verdict too, so a within-budget
+ticket carrying a flagged tic gets held for a human the same as an over-length one. See
+[CHANGELOG.md](CHANGELOG.md) for how basanite's dedup state made this need a new flag on its side.
 
 ## Development
 

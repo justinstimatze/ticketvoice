@@ -1,5 +1,30 @@
 # Changelog
 
+## Basanite wired the same way — 2026-08-28
+
+The previous entry left basanite out: `writecheck` dedupes against a per-session seen-set file, so a
+second caller checking the same call right after Claude Code's own dispatch to basanite's registered
+hook would find every word already marked seen and get nothing back. Raised with basanite directly
+over dispatch rather than worked around. Basanite's own operator signed off same-day; commit
+`157bb8b` adds `writecheck -no-dedup`, which skips the seen-set filter and the seen-set write
+entirely — `report.StateDir()` itself is only called on the deduped path now, so `-no-dedup` creates
+no state at all. The registered hook's own deduped, once-per-session behavior is unchanged; this is
+strictly additive.
+
+`judgeCope` and `judgeBasanite` are now both thin wrappers over one `judgeSibling(bin, args, raw)` —
+same wire shape in (raw stdin) and out (`hookSpecificOutput.additionalContext`) for both. Verified
+against both real binaries together, not just stubs: a ticket carrying "load-bearing," well inside
+the 150-word budget, now correctly gets `permissionDecision: "ask"` carrying findings from *both*
+siblings — cope's own `load_bearing` voicing rule and basanite's vocabulary-tic report, independently,
+from two different mechanisms. Also verified two consecutive `writecheck -no-dedup` calls against the
+same text both report the finding, and confirmed no `written-*` seen-set file appears under
+basanite's state dir after either call.
+
+This closes the hole named in the very first entry below: a within-budget ticket carrying a flagged
+tic no longer ships with nobody forced to look. Both siblings' own registered hooks keep their
+existing behavior unchanged — this hook calling them a second time, directly, changes nothing about
+what basanite's or cope's own hook shows the assistant.
+
 ## Call cope directly, gate on its verdict too — 2026-08-28
 
 The "Discussed and not built" entry below declined this, on the grounds that reading a sibling's
