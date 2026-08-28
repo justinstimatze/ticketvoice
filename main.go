@@ -8,28 +8,30 @@
 // human decides — a ticket that genuinely needs to be long stays possible, and the assistant cannot
 // wave its own gate through.
 //
-// Two sibling tools watch the same Linear writes now — basanite (vocabulary tics) and cope (voicing
-// and structure) — and both, independently, chose never to block: additionalContext only, awareness
-// after the call already went out. That split is deliberate, not a gap this tool exists to close.
-// They are general detectors tuned for a low false-positive default across everyone who runs them;
-// ticketvoice is one operator's policy on one destination, and a policy is allowed to be stricter
-// than the mechanism reporting to it. Gating on their findings directly, not just on word count,
-// would close the real remaining hole — a within-budget ticket carrying a flagged tic still ships
-// with nobody forced to look — but it is a real extension, not a cheap one: it needs a correlation
-// key and a hook-ordering guarantee across three independently-versioned tools that none of them
-// have built yet. See CHANGELOG.md.
+// Two sibling tools watch the same Linear writes — basanite (vocabulary tics) and cope (voicing and
+// structure) — and both, independently, chose never to block on their own: additionalContext only.
+// Word count alone left a real hole: a within-budget ticket carrying a flagged tic shipped with
+// nobody forced to look. This hook now closes half of it by calling cope directly, forwarding the
+// exact bytes it received to cope-gate -pretool and gating on its verdict too, not just the budget —
+// see judgeCope. Basanite isn't wired in the same way yet: its writecheck dedupes against a
+// per-session seen-set on disk, and calling it from here as well as from its own registered hook
+// would race two callers against the same state file for the same call. See CHANGELOG.md.
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"regexp"
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var version = "dev"
@@ -183,25 +185,101 @@ func evaluate(text, kind string, budget int) (over bool, reason string) {
 	return true, reason
 }
 
-func runHook() {
+// judgment is what a sibling scorer found. flagged false and note "" both mean "nothing to add" —
+// the same shape whether the sibling is clean or unreachable, since the two must not be told apart.
+type judgment struct {
+	flagged bool
+	note    string
+}
+
+// copeGatePath resolves the cope-gate binary: TICKETVOICE_COPE_GATE overrides, otherwise PATH.
+// Empty means unreachable, not an error — judgeCope treats the two the same.
+func copeGatePath() string {
+	if v := os.Getenv("TICKETVOICE_COPE_GATE"); v != "" {
+		return v
+	}
+	p, _ := exec.LookPath("cope-gate")
+	return p
+}
+
+// judgeCope runs cope's own PreToolUse entry on the exact bytes this hook received — not a
+// reimplementation of its scoring, the same binary. cope-gate -pretool writes no session state (its
+// own pretool.go says so: "Per-write feedback repeats. That is the correct amount."), so running it
+// a second time here alongside cope's own registered hook is safe — both score the same text
+// independently and land on the same answer, unlike basanite's writecheck, which dedupes against a
+// per-session seen-set on disk and would give the two callers different answers for the same call.
+// See CHANGELOG.md for that half.
+//
+// Fails open in every direction, matching cope's own stated posture for this entry: a missing
+// binary, a timeout, or output that doesn't parse all mean "cope found nothing," never "block."
+func judgeCope(rawStdin []byte) judgment {
+	bin := copeGatePath()
+	if bin == "" {
+		return judgment{}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, "-pretool")
+	cmd.Stdin = bytes.NewReader(rawStdin)
+	out, err := cmd.Output()
+	if err != nil {
+		return judgment{}
+	}
+	var resp struct {
+		HookSpecificOutput struct {
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if json.Unmarshal(out, &resp) != nil {
+		return judgment{}
+	}
+	note := strings.TrimSpace(resp.HookSpecificOutput.AdditionalContext)
+	return judgment{flagged: note != "", note: note}
+}
+
+// runHookWithInput is the hook's decision logic, taking the raw bytes so the same bytes can be
+// forwarded to cope-gate unmodified and so this runs without a subprocess in tests. Returns nil
+// when the call should proceed silently.
+func runHookWithInput(raw []byte) *hookOutput {
 	var in hookInput
 	// A hook that cannot parse its input must not block the call it was watching.
-	if err := json.NewDecoder(os.Stdin).Decode(&in); err != nil {
-		return
+	if json.Unmarshal(raw, &in) != nil {
+		return nil
 	}
 	text, budget, kind := prose(in.ToolName, in.ToolInput)
 	if text == "" {
-		return
+		return nil
 	}
 	over, reason := evaluate(text, kind, budgetFor(budget))
-	if !over {
-		return
+	cope := judgeCope(raw)
+	if !over && !cope.flagged {
+		return nil
+	}
+
+	switch {
+	case over && cope.flagged:
+		reason += fmt.Sprintf("\n\ncope also flagged this on the way out:\n\n%s", cope.note)
+	case !over:
+		reason = fmt.Sprintf("This %s is inside the %d-word budget, but cope flagged it on the way out:\n\n%s\n\nCut it and call again, or approve to send as written.",
+			kind, budget, cope.note)
 	}
 
 	var out hookOutput
 	out.HookSpecificOutput.HookEventName = "PreToolUse"
 	out.HookSpecificOutput.PermissionDecision = "ask"
 	out.HookSpecificOutput.PermissionDecisionReason = reason
+	return &out
+}
+
+func runHook() {
+	raw, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return
+	}
+	out := runHookWithInput(raw)
+	if out == nil {
+		return
+	}
 	_ = json.NewEncoder(os.Stdout).Encode(out)
 }
 

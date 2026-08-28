@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -71,6 +72,99 @@ func TestEvaluateMatchesBudget(t *testing.T) {
 	over, reason := evaluate(words(151), "issue description", defaultIssueBudget)
 	if !over || !strings.Contains(reason, "151 words") || !strings.Contains(reason, "1 over") {
 		t.Fatalf("151 words must trip with a reason naming the overage: over=%v reason=%q", over, reason)
+	}
+}
+
+// fakeCopeGate writes a stand-in cope-gate binary that answers -pretool the way the real one does,
+// so the subprocess boundary is real but the test doesn't need cope built. additionalContext == ""
+// reproduces a clean run (cope prints nothing at all — see pretool.go's "if b.Len() == 0 { return }").
+func fakeCopeGate(t *testing.T, additionalContext string) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := filepath.Join(dir, "cope-gate")
+	body := "#!/bin/sh\n"
+	if additionalContext != "" {
+		var resp struct {
+			HookSpecificOutput struct {
+				HookEventName     string `json:"hookEventName"`
+				AdditionalContext string `json:"additionalContext"`
+			} `json:"hookSpecificOutput"`
+		}
+		resp.HookSpecificOutput.HookEventName = "PreToolUse"
+		resp.HookSpecificOutput.AdditionalContext = additionalContext
+		data, err := json.Marshal(resp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload := filepath.Join(dir, "payload.json")
+		if err := os.WriteFile(payload, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		body += "cat \"$(dirname \"$0\")/payload.json\"\n"
+	}
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script
+}
+
+func TestJudgeCopeMissingBinaryFailsOpen(t *testing.T) {
+	t.Setenv("TICKETVOICE_COPE_GATE", filepath.Join(t.TempDir(), "does-not-exist"))
+	if j := judgeCope([]byte(`{}`)); j.flagged {
+		t.Fatalf("missing binary must fail open, got %+v", j)
+	}
+}
+
+func TestJudgeCopeParsesFlaggedOutput(t *testing.T) {
+	t.Setenv("TICKETVOICE_COPE_GATE", fakeCopeGate(t, "clause_symmetry: 1 violation(s)"))
+	j := judgeCope([]byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"x"}}`))
+	if !j.flagged || j.note != "clause_symmetry: 1 violation(s)" {
+		t.Fatalf("want flagged with cope's note, got %+v", j)
+	}
+}
+
+func TestJudgeCopeCleanOutputNotFlagged(t *testing.T) {
+	t.Setenv("TICKETVOICE_COPE_GATE", fakeCopeGate(t, ""))
+	if j := judgeCope([]byte(`{}`)); j.flagged {
+		t.Fatalf("clean run must not flag, got %+v", j)
+	}
+}
+
+// The gap this closes: a within-budget ticket carrying a flagged tic used to ship with nobody
+// forced to look. This is the test that would have caught it staying open.
+func TestRunHookAsksWhenCopeFlagsAnUnderBudgetTicket(t *testing.T) {
+	t.Setenv("TICKETVOICE_COPE_GATE", fakeCopeGate(t, "dangling_end: 1 violation(s)"))
+	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + words(20) + `"}}`)
+	out := runHookWithInput(raw)
+	if out == nil {
+		t.Fatal("cope-flagged, under-budget ticket must still ask")
+	}
+	if out.HookSpecificOutput.PermissionDecision != "ask" {
+		t.Fatalf("want ask, got %q", out.HookSpecificOutput.PermissionDecision)
+	}
+	if !strings.Contains(out.HookSpecificOutput.PermissionDecisionReason, "dangling_end") {
+		t.Fatalf("reason must carry cope's finding: %q", out.HookSpecificOutput.PermissionDecisionReason)
+	}
+}
+
+func TestRunHookSilentWhenBothClean(t *testing.T) {
+	t.Setenv("TICKETVOICE_COPE_GATE", fakeCopeGate(t, ""))
+	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + words(20) + `"}}`)
+	if out := runHookWithInput(raw); out != nil {
+		t.Fatalf("under budget and clean must stay silent, got %+v", out)
+	}
+}
+
+func TestRunHookReasonCarriesBothFindingsWhenOverBudgetAndFlagged(t *testing.T) {
+	t.Setenv("TICKETVOICE_COPE_GATE", fakeCopeGate(t, "forked_end: 1 violation(s)"))
+	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + words(200) + `"}}`)
+	out := runHookWithInput(raw)
+	if out == nil {
+		t.Fatal("over-budget ticket must ask")
+	}
+	if !strings.Contains(out.HookSpecificOutput.PermissionDecisionReason, "200 words") ||
+		!strings.Contains(out.HookSpecificOutput.PermissionDecisionReason, "forked_end") {
+		t.Fatalf("reason must carry both the word count and cope's finding: %q", out.HookSpecificOutput.PermissionDecisionReason)
 	}
 }
 

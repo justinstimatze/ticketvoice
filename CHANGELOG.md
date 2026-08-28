@@ -1,5 +1,33 @@
 # Changelog
 
+## Call cope directly, gate on its verdict too — 2026-08-28
+
+The "Discussed and not built" entry below declined this, on the grounds that reading a sibling's
+finding would need a correlation key and a hook-ordering guarantee across three independently-
+versioned tools. That objection assumed ticketvoice would have to read cope's or basanite's output
+*after* Claude Code dispatched to them separately — file, `additionalContext`, whatever channel,
+arriving in whatever order hooks fire in. It doesn't have to. `runHook` now forwards its own raw
+stdin — the exact bytes Claude Code sent it — to `cope-gate -pretool` as a subprocess and reads the
+verdict back directly, inside its own process, before it decides anything. No correlation key, no
+ordering dependency: it's not reading another hook's output, it's running the same binary that hook
+runs, on the same input, itself.
+
+This is safe specifically because `cope-gate -pretool` writes no session state — its own doc comment
+says so ("Per-write feedback repeats. That is the correct amount."). Two independent callers scoring
+the same text land on the same answer. Verified against the real binary, not just a stub: cope's own
+`TestExternalLaneKeepsTheVoicingRules` fixture (`"Row loss on cursor reset. The sync drops every row
+written after the upstream cursor rewinds..."`) is 34 words, nowhere near the 150-word budget, and
+now correctly comes back `permissionDecision: "ask"` carrying cope's `labelled_opening` finding —
+the exact case the previous entry named and left open.
+
+Basanite is not wired the same way, and not because the idea doesn't apply — it's a real,
+newly-found blocker. `writecheck` dedupes against a per-session seen-set file: the first caller to
+run it for a given call marks the words seen, and a second caller checking the same text right after
+sees nothing new. Claude Code already dispatches to basanite's own registered hook on this same tool
+matcher; ticketvoice calling `writecheck` too would race that hook for the same state file, and
+whichever ran second would silently get an empty result. Raised with basanite directly rather than
+worked around quietly — a stateless check path resolves it cleanly if basanite wants to add one.
+
 ## Gate the docs through the gate — 2026-08-28
 
 Cope generates and gates its own README through cope-gate (`make readme`, `make check-readme` —
