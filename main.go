@@ -22,7 +22,9 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"runtime/debug"
@@ -154,12 +156,34 @@ const slots = `Four slots, in this order:
   4. The fix, as a code block, plus one line on how to prove it can go red.
 SHAs and file:line carry the detail; do not narrate what the reader can open.`
 
-func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-version") {
-		fmt.Println(buildVersion())
-		return
+// budgetFor applies the TICKETVOICE_MAX_WORDS override, shared by the hook path and --check.
+func budgetFor(base int) int {
+	if v := os.Getenv("TICKETVOICE_MAX_WORDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
 	}
+	return base
+}
 
+// evaluate is the one gate both the hook and `--check` run through: same budget math, same reason
+// text. over is false and reason is empty when the text is within budget.
+func evaluate(text, kind string, budget int) (over bool, reason string) {
+	words := proseWords(text)
+	if words <= budget {
+		return false, ""
+	}
+	reason = fmt.Sprintf("This %s is %d words of prose against a %d-word budget — %d over.\n\n%s",
+		kind, words, budget, words-budget, slots)
+	if h := headerCount(text); h > 0 && words < headerFloor {
+		reason += fmt.Sprintf("\n\nIt also carries %d section header(s) under %d words, which cost two lines each and imply more document than there is.",
+			h, headerFloor)
+	}
+	reason += "\n\nCut it and call again, or approve to send as written."
+	return true, reason
+}
+
+func runHook() {
 	var in hookInput
 	// A hook that cannot parse its input must not block the call it was watching.
 	if err := json.NewDecoder(os.Stdin).Decode(&in); err != nil {
@@ -169,28 +193,70 @@ func main() {
 	if text == "" {
 		return
 	}
-	if v := os.Getenv("TICKETVOICE_MAX_WORDS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			budget = n
-		}
-	}
-
-	words := proseWords(text)
-	if words <= budget {
+	over, reason := evaluate(text, kind, budgetFor(budget))
+	if !over {
 		return
 	}
-
-	reason := fmt.Sprintf("This %s is %d words of prose against a %d-word budget — %d over.\n\n%s",
-		kind, words, budget, words-budget, slots)
-	if h := headerCount(text); h > 0 && words < headerFloor {
-		reason += fmt.Sprintf("\n\nIt also carries %d section header(s) under %d words, which cost two lines each and imply more document than there is.",
-			h, headerFloor)
-	}
-	reason += "\n\nCut it and call again, or approve to send as written."
 
 	var out hookOutput
 	out.HookSpecificOutput.HookEventName = "PreToolUse"
 	out.HookSpecificOutput.PermissionDecision = "ask"
 	out.HookSpecificOutput.PermissionDecisionReason = reason
 	_ = json.NewEncoder(os.Stdout).Encode(out)
+}
+
+// runCheck runs prose through the same gate as the hook, outside a tool call — for gating this
+// project's own docs the way cope gates README.md through cope-gate and effigy writes its README
+// through its own Layer 2. ticketvoice doesn't generate prose, so the analogue is narrower: check a
+// slice of prose against the same budget a Linear write would face, as if it were a ticket entry.
+func runCheck(args []string) int {
+	fs := flag.NewFlagSet("check", flag.ContinueOnError)
+	field := fs.String("field", "issue", `budget to check against: "issue" or "comment"`)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "usage: ticketvoice --check <file|-> [-field issue|comment]")
+		return 2
+	}
+
+	kind, budget := "issue description", defaultIssueBudget
+	if *field == "comment" {
+		kind, budget = "comment", defaultCommentBudget
+	}
+	budget = budgetFor(budget)
+
+	path := fs.Arg(0)
+	var data []byte
+	var err error
+	if path == "-" {
+		data, err = io.ReadAll(os.Stdin)
+	} else {
+		data, err = os.ReadFile(path)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+
+	over, reason := evaluate(string(data), kind, budget)
+	if !over {
+		fmt.Printf("%s: %d words against a %d-word %s budget — within budget.\n", path, proseWords(string(data)), budget, kind)
+		return 0
+	}
+	fmt.Println(reason)
+	return 1
+}
+
+func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "--version", "-version":
+			fmt.Println(buildVersion())
+			return
+		case "--check":
+			os.Exit(runCheck(os.Args[2:]))
+		}
+	}
+	runHook()
 }

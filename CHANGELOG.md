@@ -1,5 +1,24 @@
 # Changelog
 
+## Gate the docs through the gate — 2026-08-28
+
+Cope generates and gates its own README through cope-gate (`make readme`, `make check-readme` —
+`cope-gate --check README.md`). Effigy writes its README through its own Layer 2
+(`generate_readme.py`, from a test-fixture card). Neither convention transfers whole: ticketvoice
+has no LLM in its loop and nothing to generate, and its rule is a length budget, not a style check —
+gating the full README against a 150-word issue budget would fail by design, since a README is
+supposed to be longer than a ticket.
+
+What transfers is the check half, narrowed to the one paragraph actually written in ticket-body
+register: the Why section. `main.go` gained a `--check <file|-> [-field issue|comment]` mode that
+runs the exact `evaluate()` function the hook runs — not a reimplementation — against a file or
+stdin. `make check-readme` extracts the Why section between its `## ` markers and pipes it through
+`--check -`. Wired into both `hooks/pre-commit` (blocking, same tier as `go test`) and `ci.yml`.
+
+Verified: `main_test.go`'s `TestRunCheckAcceptsReadmeWhySection` reads README.md directly and reruns
+the same check the Makefile target runs, so a future edit to the Why section that pushes it over 150
+words fails a unit test, not just a pre-commit hook someone could `--no-verify` past.
+
 ## Mechanism vs. policy — 2026-08-28
 
 Both sibling tools shipped their own Linear coverage since yesterday's entry. Basanite's dedup fix

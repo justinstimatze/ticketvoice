@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -58,5 +59,38 @@ func TestBudgetBoundary(t *testing.T) {
 	under, _, _ := prose("mcp__linear__save_issue", json.RawMessage(`{"description":"`+words(118)+`"}`))
 	if proseWords(under) > budget {
 		t.Fatalf("118 words tripped the %d-word budget", budget)
+	}
+}
+
+// evaluate is the single code path both the hook and --check run through; this is the one place
+// that would miss a divergence between them.
+func TestEvaluateMatchesBudget(t *testing.T) {
+	if over, reason := evaluate(words(150), "issue description", defaultIssueBudget); over || reason != "" {
+		t.Fatalf("150 words against a 150-word budget must not trip: over=%v reason=%q", over, reason)
+	}
+	over, reason := evaluate(words(151), "issue description", defaultIssueBudget)
+	if !over || !strings.Contains(reason, "151 words") || !strings.Contains(reason, "1 over") {
+		t.Fatalf("151 words must trip with a reason naming the overage: over=%v reason=%q", over, reason)
+	}
+}
+
+// runCheck is the dogfooding path — README.md's own Why section, gated as if it were a Linear
+// issue description, the way `make check-readme` runs it. It must hold, not just compile.
+func TestRunCheckAcceptsReadmeWhySection(t *testing.T) {
+	data, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatalf("read README.md: %v", err)
+	}
+	const start, end = "## Why\n", "\n## "
+	i := strings.Index(string(data), start)
+	if i < 0 {
+		t.Fatal("README.md has no ## Why section")
+	}
+	body := string(data)[i+len(start):]
+	if j := strings.Index(body, end); j >= 0 {
+		body = body[:j]
+	}
+	if over, reason := evaluate(body, "issue description", defaultIssueBudget); over {
+		t.Fatalf("README's Why section no longer fits its own budget: %s", reason)
 	}
 }
