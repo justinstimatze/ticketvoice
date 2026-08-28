@@ -48,12 +48,12 @@ func TestProseSelectsFieldAndBudgetPerTool(t *testing.T) {
 	}
 }
 
-// Injure the thing it guards: the real CUR-255 body was 283 words and must trip the budget, while
-// the 118-word rewrite must not. A gate nobody has watched fail is not a gate.
+// Injure the thing it guards: the real over-budget ticket body was 238 words and must trip the
+// budget, while the 118-word rewrite must not. A gate nobody has watched fail is not a gate.
 func TestBudgetBoundary(t *testing.T) {
-	over, budget, _ := prose("mcp__linear__save_issue", json.RawMessage(`{"description":"`+words(283)+`"}`))
+	over, budget, _ := prose("mcp__linear__save_issue", json.RawMessage(`{"description":"`+words(238)+`"}`))
 	if proseWords(over) <= budget {
-		t.Fatalf("283 words did not exceed the %d-word budget", budget)
+		t.Fatalf("238 words did not exceed the %d-word budget", budget)
 	}
 	under, _, _ := prose("mcp__linear__save_issue", json.RawMessage(`{"description":"`+words(118)+`"}`))
 	if proseWords(under) > budget {

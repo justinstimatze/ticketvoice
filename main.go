@@ -1,12 +1,23 @@
 // ticketvoice is a Claude Code PreToolUse hook that holds Linear ticket prose to a word budget.
 //
 // It exists because the register note alone did not hold. A memory saying "write like a pragmatic
-// staff engineer" was in force on 2026-07-20 and a 283-word ticket body still shipped on 2026-08-04,
+// staff engineer" was in force on 2026-07-20 and a 238-word ticket body still shipped on 2026-08-04,
 // because a register is a taste and not a limit. A word count is a limit, and it can fail.
 //
 // Silent when the body is inside the budget. Over budget it returns permissionDecision "ask", so the
 // human decides — a ticket that genuinely needs to be long stays possible, and the assistant cannot
 // wave its own gate through.
+//
+// Two sibling tools watch the same Linear writes now — basanite (vocabulary tics) and cope (voicing
+// and structure) — and both, independently, chose never to block: additionalContext only, awareness
+// after the call already went out. That split is deliberate, not a gap this tool exists to close.
+// They are general detectors tuned for a low false-positive default across everyone who runs them;
+// ticketvoice is one operator's policy on one destination, and a policy is allowed to be stricter
+// than the mechanism reporting to it. Gating on their findings directly, not just on word count,
+// would close the real remaining hole — a within-budget ticket carrying a flagged tic still ships
+// with nobody forced to look — but it is a real extension, not a cheap one: it needs a correlation
+// key and a hook-ordering guarantee across three independently-versioned tools that none of them
+// have built yet. See CHANGELOG.md.
 package main
 
 import (

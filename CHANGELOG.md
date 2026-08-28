@@ -1,5 +1,32 @@
 # Changelog
 
+## Mechanism vs. policy — 2026-08-28
+
+Both sibling tools shipped their own Linear coverage since yesterday's entry. Basanite's dedup fix
+(`10bb9c0`, v0.10.0) landed the same day this entry was written. Cope added `cope-gate --pretool`
+(`70b319a`), a new `PreToolUse` entry over the same five `mcp__linear__save_*` tools, scoring
+voicing and structure the same `internal/scan` path already applies to a chat reply.
+
+Both chose the same posture ticketvoice was built to not have: `additionalContext`, no
+`permissionDecision`, and both said so on purpose rather than by default. Cope's own reasoning —
+gating a Linear write harder than it gates its own chat output at `Stop`, where `--block` is off,
+would invert the tool. Basanite's writecheck reasoning matches. Neither is a gap; both are a
+considered stance about what a general-purpose detector should default to for everyone who runs it.
+
+That leaves ticketvoice as the only one of the three that can hold a call for a human to see before
+it posts. Not by having more coverage — it still knows nothing but a word count — but by being the
+one piece on this surface whose entire job is deciding whether a human needs to look, which is a
+different question from whether something is wrong with the prose.
+
+Discussed and not built: ticketvoice reading cope's and basanite's findings directly and deciding
+whether to block on them, instead of only on word count. That's the fix for the gap the previous
+entry named and declined to patch around — a within-budget ticket carrying a flagged tic still
+ships today with nobody forced to look, same as before any of this. It's a real feature, not a
+relay: cope and basanite would each need to write a per-call finding somewhere keyed to the specific
+tool call, and Claude Code does not currently promise the hook-ordering guarantee ticketvoice would
+need to read it before deciding. Three independently-versioned tools would need to agree on that
+protocol before any code moves. Not started.
+
 ## Considered and declined — 2026-08-27
 
 Basanite's `writecheck` hook dedupes each flagged tic to one mention per session, so a word already
