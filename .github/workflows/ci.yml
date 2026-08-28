@@ -1,0 +1,30 @@
+name: ci
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - name: gofmt
+        run: test -z "$(gofmt -l .)"
+      - name: vet
+        run: go vet ./...
+      # Pinned rather than @latest: an unpinned tool fetches new code on every run, which
+      # dependabot cannot see and a release cannot reproduce. See cope's ci.yml for the incident
+      # that made this the house convention — a floating go-version plus an unpinned staticcheck
+      # broke silently on a Go toolchain bump with no diff to point at.
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@2026.2 ./...
+      - name: test
+        run: go test -race ./...
