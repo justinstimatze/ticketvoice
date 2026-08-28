@@ -83,6 +83,11 @@ by knowing more (it still knows nothing but a word count), but by being the one 
 surface whose job is deciding whether a human needs to look. The fuller case, including what a
 tighter integration between the three would actually require, is in [CHANGELOG.md](CHANGELOG.md).
 
+## Development
+
+`git config core.hooksPath hooks` once, after cloning, activates the tracked pre-commit hook —
+gofmt, vet, test, plus a non-blocking CodeScene delta check when `cs` is on `PATH`.
+
 ## License
 
 MIT. See `LICENSE`.
