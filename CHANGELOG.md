@@ -1,5 +1,38 @@
 # Changelog
 
+## GitHub coverage, via a new gh-write wrapper — 2026-08-28
+
+Raised while working on wovim (a Neovim fork tracked on GitHub, not Linear): everything this repo
+covered was Linear-only, so a `gh issue create`/`gh pr create` call carrying an over-length or
+tic-flagged body shipped with nobody watching it at all.
+
+Not a matcher addition. `PreToolUse` for a Bash call hands this hook `tool_input.command` — the
+raw shell string, not parsed argv — and a `gh issue create --title "..." --body "..."` line can't
+be reliably read back out of that: `--body`/`--body-file`/`--notes`/`--notes-file` differ across
+`issue`/`pr`/`release` and `create`/`comment`/`edit`, each with its own quoting, and a wrong
+extraction doesn't fail open the way an unparseable Linear call does — it can grab the wrong span
+(a `--title` instead of a `--body`) and report a plausible, wrong verdict.
+
+Added `cmd/gh-write` instead: a thin wrapper over `gh issue`/`gh pr` that refuses `--body`,
+`-b`, `--body-file`, `-F` outright and takes the body from stdin only — a quoted heredoc in
+practice, e.g. `gh-write issue create --title T <<'EOF' ... EOF`. Everything else passes straight
+through to `gh` unchanged. That turns "find a body in an arbitrary shell command" into "find a
+fixed CLI grammar followed by a heredoc," which is a plain string search
+(`ghWriteProse`/`extractProse` in `main.go`) — no shell tokenizer, and the failure mode for a
+Bash command that isn't a gh-write call, or whose heredoc this can't find, is "nothing to check,"
+matching Linear's existing unparseable-input behavior.
+
+Covers `issue`/`pr` × `create`/`comment`/`edit` — matching what this hook already covers on
+Linear (issues and comments), not release notes, which read as a changelog rather than a ticket
+and aren't shaped for a 150-word prose budget.
+
+Wired: `ticketvoice`'s own `PreToolUse` matcher gained `|Bash` (`~/.claude/settings.json`) — cheap
+for every other Bash call, since `ghWriteProse` returns immediately when the command isn't a
+gh-write invocation. `Makefile`'s `build`/`install` now also build `gh-write`. Verified against the
+real `PreToolUse` JSON shape, not just the exported functions: an over-budget `gh-write issue
+create` call through `ticketvoice`'s stdin path correctly returns `permissionDecision: "ask"`; an
+under-budget one and an unrelated `ls -la` both return nothing.
+
 ## Basanite wired the same way — 2026-08-28
 
 The previous entry left basanite out: `writecheck` dedupes against a per-session seen-set file, so a

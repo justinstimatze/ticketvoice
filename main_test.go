@@ -50,6 +50,82 @@ func TestProseSelectsFieldAndBudgetPerTool(t *testing.T) {
 	}
 }
 
+// gh-write (cmd/gh-write) is the only thing allowed to put a body in front of this hook as a
+// Bash command, and it always does so as a heredoc — see ghWriteProse's doc comment for why.
+func TestGhWriteProseExtractsHeredocBody(t *testing.T) {
+	for _, tc := range []struct {
+		name, command, wantText, wantKind string
+		wantBudget                        int
+		wantOK                            bool
+	}{
+		{
+			name:       "issue create",
+			command:    "gh-write issue create --title 'Bug: X' <<'EOF'\nhello there\nEOF\n",
+			wantText:   "hello there",
+			wantKind:   "issue description",
+			wantBudget: defaultIssueBudget,
+			wantOK:     true,
+		},
+		{
+			name:       "pr create",
+			command:    "gh-write pr create --title T --base main <<'EOF'\nhello there\nEOF\n",
+			wantText:   "hello there",
+			wantKind:   "PR description",
+			wantBudget: defaultIssueBudget,
+			wantOK:     true,
+		},
+		{
+			name:       "issue comment",
+			command:    "gh-write issue comment 42 <<'EOF'\nlgtm\nEOF\n",
+			wantText:   "lgtm",
+			wantKind:   "issue comment",
+			wantBudget: defaultCommentBudget,
+			wantOK:     true,
+		},
+		{
+			name:       "multi-line body preserved",
+			command:    "gh-write pr edit 7 <<'EOF'\nline one\nline two\nEOF\n",
+			wantText:   "line one\nline two",
+			wantKind:   "PR description",
+			wantBudget: defaultIssueBudget,
+			wantOK:     true,
+		},
+		{
+			name:    "unrelated bash command",
+			command: "gh pr create --title T --body 'inline, unreadable'",
+			wantOK:  false,
+		},
+		{
+			name:    "gh-write with no heredoc",
+			command: "gh-write issue create --title T --body-file notes.md",
+			wantOK:  false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			text, kind, budget, ok := ghWriteProse(tc.command)
+			if ok != tc.wantOK {
+				t.Fatalf("ok: want %v, got %v (text=%q kind=%q budget=%d)", tc.wantOK, ok, text, kind, budget)
+			}
+			if !ok {
+				return
+			}
+			if text != tc.wantText || kind != tc.wantKind || budget != tc.wantBudget {
+				t.Fatalf("want (%q, %q, %d), got (%q, %q, %d)", tc.wantText, tc.wantKind, tc.wantBudget, text, kind, budget)
+			}
+		})
+	}
+}
+
+// The --body-file rejection is gh-write's job (cmd/gh-write); this only has to confirm that a
+// Bash command carrying one instead of a heredoc is *ignored*, not misread as an empty body that
+// would pass every budget silently.
+func TestExtractProseIgnoresNonGhWriteBash(t *testing.T) {
+	text, budget, kind := extractProse("Bash", json.RawMessage(`{"command":"ls -la"}`))
+	if text != "" || budget != 0 || kind != "" {
+		t.Fatalf("want no prose for an unrelated Bash command, got (%q, %d, %q)", text, budget, kind)
+	}
+}
+
 // Injure the thing it guards: the real over-budget ticket body was 238 words and must trip the
 // budget, while the 118-word rewrite must not. A gate nobody has watched fail is not a gate.
 func TestBudgetBoundary(t *testing.T) {

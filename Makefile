@@ -5,9 +5,11 @@ LDFLAGS := -ldflags "-X main.version=$(VERSION)"
 
 build:
 	go build $(LDFLAGS) -o bin/ticketvoice .
+	go build $(LDFLAGS) -o bin/gh-write ./cmd/gh-write
 
 install:
 	go build $(LDFLAGS) -o $(shell go env GOPATH)/bin/ticketvoice .
+	go build $(LDFLAGS) -o $(shell go env GOPATH)/bin/gh-write ./cmd/gh-write
 
 test:
 	go test ./...

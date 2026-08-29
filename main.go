@@ -92,6 +92,10 @@ type linearInput struct {
 	} `json:"patch"`
 }
 
+type bashInput struct {
+	Command string `json:"command"`
+}
+
 type hookOutput struct {
 	HookSpecificOutput struct {
 		HookEventName            string `json:"hookEventName"`
@@ -147,6 +151,68 @@ func prose(tool string, raw json.RawMessage) (text string, budget int, kind stri
 		}
 	}
 	return "", 0, ""
+}
+
+var (
+	ghWriteInvoke = regexp.MustCompile(`(?m)^\s*gh-write\s+(issue|pr)\s+(create|comment|edit)\b`)
+	heredocOpener = regexp.MustCompile(`<<-?\s*(['"]?)(\w+)['"]?[ \t]*\r?\n`)
+)
+
+// ghWriteProse finds a gh-write invocation (see cmd/gh-write) in a Bash command string
+// and extracts the heredoc body that follows it, with the budget kind that applies.
+// gh-write refuses --body/--body-file, so the body is always a heredoc: literal text with
+// no shell escaping, unlike a quoted --body argument — which is what makes a plain string
+// search sufficient here instead of a full shell tokenizer. Returns ok=false for any Bash
+// command that isn't a gh-write call, or whose heredoc this can't find, and the caller
+// must treat that as "nothing to check," not "block" — same as an unparseable Linear call.
+func ghWriteProse(command string) (text, kind string, budget int, ok bool) {
+	inv := ghWriteInvoke.FindStringSubmatchIndex(command)
+	if inv == nil {
+		return "", "", 0, false
+	}
+	object := command[inv[2]:inv[3]]
+	verb := command[inv[4]:inv[5]]
+
+	rest := command[inv[1]:]
+	open := heredocOpener.FindStringSubmatchIndex(rest)
+	if open == nil {
+		return "", "", 0, false
+	}
+	delim := rest[open[4]:open[5]]
+	bodyStart := open[1]
+	closer := regexp.MustCompile(`(?m)^[ \t]*` + regexp.QuoteMeta(delim) + `[ \t]*$`)
+	loc := closer.FindStringIndex(rest[bodyStart:])
+	if loc == nil {
+		return "", "", 0, false
+	}
+	text = strings.TrimSuffix(rest[bodyStart:bodyStart+loc[0]], "\n")
+
+	if verb == "comment" {
+		return text, object + " comment", defaultCommentBudget, true
+	}
+	if object == "pr" {
+		return text, "PR description", defaultIssueBudget, true
+	}
+	return text, "issue description", defaultIssueBudget, true
+}
+
+// extractProse dispatches on the calling tool: Linear's MCP tools carry a structured
+// description/body field (prose, above), a Bash call carries an opaque command string
+// that only a gh-write invocation makes readable (ghWriteProse, above). Any other tool
+// yields no prose to check.
+func extractProse(tool string, raw json.RawMessage) (text string, budget int, kind string) {
+	if tool == "Bash" {
+		var b bashInput
+		if json.Unmarshal(raw, &b) != nil {
+			return "", 0, ""
+		}
+		t, k, bud, ok := ghWriteProse(b.Command)
+		if !ok {
+			return "", 0, ""
+		}
+		return t, bud, k
+	}
+	return prose(tool, raw)
 }
 
 const slots = `Four slots, in this order:
@@ -254,7 +320,7 @@ func runHookWithInput(raw []byte) *hookOutput {
 	if json.Unmarshal(raw, &in) != nil {
 		return nil
 	}
-	text, rawBudget, kind := prose(in.ToolName, in.ToolInput)
+	text, rawBudget, kind := extractProse(in.ToolName, in.ToolInput)
 	if text == "" {
 		return nil
 	}

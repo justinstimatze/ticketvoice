@@ -2,10 +2,15 @@
 
 [![ci](https://github.com/justinstimatze/ticketvoice/actions/workflows/ci.yml/badge.svg)](https://github.com/justinstimatze/ticketvoice/actions/workflows/ci.yml)
 
-A Claude Code `PreToolUse` hook that holds Linear ticket prose to a word budget: 150 words for an
-issue description, 120 for a comment, fenced code excluded. Over budget it returns
+A Claude Code `PreToolUse` hook that holds ticket prose to a word budget: 150 words for an issue
+or PR description, 120 for a comment, fenced code excluded. Over budget it returns
 `permissionDecision: "ask"`, so a human decides — a ticket that needs the length stays possible,
 and the assistant can't wave its own ticket through. Silent when the body is inside the budget.
+
+Covers two surfaces: Linear, via its MCP tools' structured `description`/`body` fields, and
+GitHub issues/PRs, via [`gh-write`](#gh-write-github-issues-and-prs) — a thin wrapper this repo
+also builds, which is the only way this hook can see a GitHub body at all (see that section for
+why a plain `gh issue create --body "..."` can't be gated).
 
 ## Why
 
@@ -34,19 +39,20 @@ Cut it and call again, or approve to send as written.
 ```bash
 git clone https://github.com/justinstimatze/ticketvoice
 cd ticketvoice
-make install   # builds to $(go env GOPATH)/bin/ticketvoice, version from git describe
+make install   # builds ticketvoice and gh-write to $(go env GOPATH)/bin, version from git describe
 ```
 
-Then wire it into `~/.claude/settings.json` as a `PreToolUse` hook on the two Linear write tools.
-The path has to be absolute — hooks run in whatever environment Claude Code was launched from, which
-may not have your Go bin directory on `PATH`:
+Then wire `ticketvoice` into `~/.claude/settings.json` as a `PreToolUse` hook on the two Linear
+write tools and on `Bash` (for `gh-write` calls — see below). The path has to be absolute — hooks
+run in whatever environment Claude Code was launched from, which may not have your Go bin
+directory on `PATH`:
 
 ```json
 {
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "mcp__linear__save_issue|mcp__linear__save_comment",
+        "matcher": "mcp__linear__save_issue|mcp__linear__save_comment|Bash",
         "hooks": [
           { "type": "command", "command": "/home/you/go/bin/ticketvoice" }
         ]
@@ -56,7 +62,47 @@ may not have your Go bin directory on `PATH`:
 }
 ```
 
-There's no installer subcommand — this is a plain hook binary, wired by hand once.
+There's no installer subcommand — this is a plain hook binary, wired by hand once. Matching on
+`Bash` runs ticketvoice on every Bash call, but it's a fast regex check that returns immediately
+for anything that isn't a `gh-write` invocation — see [Development](#development) for the cost.
+
+## gh-write: GitHub issues and PRs
+
+`gh-write` is a companion binary this repo also builds — `gh issue`/`gh pr`, but the body always
+comes from stdin instead of a `--body`/`--body-file` flag:
+
+```bash
+gh-write issue create --title "Bug: X" --repo you/repo <<'EOF'
+Whatever the body is. No shell escaping to think about — it's a heredoc, not a quoted argument.
+EOF
+
+gh-write pr comment 42 <<'EOF'
+lgtm
+EOF
+```
+
+Everything gh-write doesn't recognize (`--repo`, `--label`, `--base`, `--draft`, ...) passes
+straight through to `gh`, unchanged. `--body`, `-b`, `--body-file`, `-F`, and their `=value` forms
+are refused outright — gh-write's whole purpose is making the heredoc the only path, not one
+convention among several.
+
+**Why this exists**, and why it isn't as simple as pointing ticketvoice's matcher at `gh` itself:
+ticketvoice reads a Bash `PreToolUse` call's `tool_input.command` — the same opaque shell string
+Claude submitted, not a parsed argv. Linear's MCP tools hand it a clean JSON `description`/`body`
+field; a raw `gh issue create --title "..." --body "..."` hands it one shell-quoted line, and
+`--body`, `--body-file`, `--notes`/`--notes-file` differ across `issue`/`pr`/`release` and
+`create`/`comment`/`edit`, each with its own escaping and heredoc/file-path variants. Reliably
+pulling prose out of that would need a real shell tokenizer, and a tokenizer that gets it wrong
+doesn't fail open the way an unparseable Linear call does — it can match the wrong span (a
+`--title` instead of a `--body`) and report a plausible, wrong verdict, which is worse than no
+gate at all.
+
+gh-write turns that into a much narrower problem: it owns a single, fixed CLI grammar, so the
+only thing ticketvoice has to find is `gh-write (issue|pr) (create|comment|edit)` followed by a
+heredoc — literal text between two markers, no shell escaping inside it, extractable with a plain
+string search (`ghWriteProse` in `main.go`). Covers issue and PR create/comment/edit, matching the
+Linear surface this hook already covers (issues and comments) — not release notes, which are a
+different genre (a changelog, not a ticket) that this gate isn't shaped for.
 
 ## Configuration
 
@@ -76,13 +122,19 @@ reason: headers cost two lines each and imply more document than there is.
 
 ## Where this sits next to cope and basanite
 
-Two other tools watch the same Linear writes — [basanite](https://github.com/justinstimatze/basanite)
+Two other tools watch the same writes — [basanite](https://github.com/justinstimatze/basanite)
 for vocabulary tics, [cope](https://github.com/justinstimatze/cope) for voicing and structure — and
 neither blocks on its own: `additionalContext`, after the call already went out. Ticketvoice does
 block, and it isn't judging on word count alone: it forwards its own stdin to `cope-gate -pretool`
 and `basanite writecheck -no-dedup` directly and asks on either verdict too, so a within-budget
 ticket carrying a flagged tic gets held for a human the same as an over-length one. See
 [CHANGELOG.md](CHANGELOG.md) for how basanite's dedup state made this need a new flag on its side.
+
+Their own `PreToolUse` matchers are still Linear-only — cope's `-pretool` and basanite's
+`writecheck` aren't wired to `Bash`, so a `gh-write` call only gets scored on the way in, through
+ticketvoice's own forwarding above, not through their independently-registered hooks the way a
+Linear call is. That's fine: ticketvoice forwards the exact bytes either sibling would have
+scored, so the verdict is the same either path.
 
 ## Development
 
