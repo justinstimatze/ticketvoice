@@ -1,0 +1,45 @@
+#!/bin/sh
+# Pre-commit hook for ticketvoice
+
+echo "Running gofmt..."
+unformatted=$(gofmt -l .)
+if [ -n "$unformatted" ]; then
+    echo "$unformatted"
+    echo ""
+    echo "gofmt found unformatted files. Run 'gofmt -w .' or use --no-verify to skip."
+    exit 1
+fi
+
+echo "Running go vet..."
+if ! go vet ./...; then
+    echo ""
+    echo "go vet failed. Fix issues or use --no-verify to skip."
+    exit 1
+fi
+
+echo "Running go test..."
+if ! go test ./...; then
+    echo ""
+    echo "Tests failed. Fix or use --no-verify to skip."
+    exit 1
+fi
+
+echo "Running check-readme..."
+if ! make check-readme >/dev/null; then
+    echo ""
+    echo "README's Why section no longer fits its own budget. Fix or use --no-verify to skip."
+    exit 1
+fi
+
+# >>> codescene-precommit (managed) >>>
+# CodeScene delta analysis on staged changes. Non-blocking: findings are
+# printed, the commit proceeds. --error-on-warnings is required for cs to
+# signal at all; without it cs delta exits 0 unconditionally and the warning
+# below is unreachable.
+if command -v cs >/dev/null 2>&1; then
+  if ! cs delta --staged --error-on-warnings; then
+    echo ""
+    echo "CodeScene flagged code-health findings above (warning only, commit proceeds)."
+  fi
+fi
+# <<< codescene-precommit (managed) <<<
