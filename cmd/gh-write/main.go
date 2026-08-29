@@ -33,29 +33,33 @@ func rejectsBody(arg string) bool {
 	return bodyFlags[arg] || strings.HasPrefix(arg, "--body=") || strings.HasPrefix(arg, "--body-file=")
 }
 
-func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+// validate checks the object/verb/flags shape and returns the gh args to run (object, verb,
+// and whatever's left of args), or a usage error to print instead. Split out of run so the
+// exec/exit-code plumbing there isn't tangled up with argument checking.
+func validate(args []string) (ghArgs []string, usageErr string) {
 	if len(args) < 2 {
-		fmt.Fprintln(stderr, "usage: gh-write <issue|pr> <create|comment|edit> [id] [gh flags...]")
-		return 2
+		return nil, "usage: gh-write <issue|pr> <create|comment|edit> [id] [gh flags...]"
 	}
 	object, verb := args[0], args[1]
 	if object != "issue" && object != "pr" {
-		fmt.Fprintf(stderr, "gh-write: unsupported object %q (want issue or pr)\n", object)
-		return 2
+		return nil, fmt.Sprintf("gh-write: unsupported object %q (want issue or pr)", object)
 	}
-	switch verb {
-	case "create", "comment", "edit":
-	default:
-		fmt.Fprintf(stderr, "gh-write: unsupported verb %q (want create, comment, or edit)\n", verb)
-		return 2
+	if verb != "create" && verb != "comment" && verb != "edit" {
+		return nil, fmt.Sprintf("gh-write: unsupported verb %q (want create, comment, or edit)", verb)
 	}
-
-	rest := args[2:]
-	for _, a := range rest {
+	for _, a := range args[2:] {
 		if rejectsBody(a) {
-			fmt.Fprintf(stderr, "gh-write: %s is not accepted — pipe or heredoc the body on stdin instead, so it lands in the Bash command text ticketvoice reads\n", a)
-			return 2
+			return nil, fmt.Sprintf("gh-write: %s is not accepted — pipe or heredoc the body on stdin instead, so it lands in the Bash command text ticketvoice reads", a)
 		}
+	}
+	return args, ""
+}
+
+func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	ghArgs, usageErr := validate(args)
+	if usageErr != "" {
+		fmt.Fprintln(stderr, usageErr)
+		return 2
 	}
 
 	body, err := io.ReadAll(stdin)
@@ -64,10 +68,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	ghArgs := append([]string{object, verb}, rest...)
-	ghArgs = append(ghArgs, "--body-file", "-")
-
-	cmd := exec.Command("gh", ghArgs...)
+	cmd := exec.Command("gh", append(ghArgs, "--body-file", "-")...)
 	cmd.Stdin = bytes.NewReader(body)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
