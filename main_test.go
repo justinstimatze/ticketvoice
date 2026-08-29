@@ -289,33 +289,34 @@ func TestJudgeBasaniteCleanOutputNotFlagged(t *testing.T) {
 }
 
 // The gap this closes: a within-budget ticket carrying a flagged tic used to ship with nobody
-// forced to look. This is the test that would have caught it staying open.
-func TestRunHookAsksWhenCopeFlagsAnUnderBudgetTicket(t *testing.T) {
+// forced to look. This is the test that would have caught it staying open. Denied, not asked —
+// the reason goes to Claude, not a human; see the runHookWithInput doc comment.
+func TestRunHookDeniesWhenCopeFlagsAnUnderBudgetTicket(t *testing.T) {
 	clean(t)
 	t.Setenv("TICKETVOICE_COPE_GATE", fakeSiblingBinary(t, "cope-gate", "dangling_end: 1 violation(s)"))
 	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + words(20) + `"}}`)
 	out := runHookWithInput(raw)
 	if out == nil {
-		t.Fatal("cope-flagged, under-budget ticket must still ask")
+		t.Fatal("cope-flagged, under-budget ticket must still be denied")
 	}
-	if out.HookSpecificOutput.PermissionDecision != "ask" {
-		t.Fatalf("want ask, got %q", out.HookSpecificOutput.PermissionDecision)
+	if out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("want deny, got %q", out.HookSpecificOutput.PermissionDecision)
 	}
 	if !strings.Contains(out.HookSpecificOutput.PermissionDecisionReason, "dangling_end") {
 		t.Fatalf("reason must carry cope's finding: %q", out.HookSpecificOutput.PermissionDecisionReason)
 	}
 }
 
-func TestRunHookAsksWhenBasaniteFlagsAnUnderBudgetTicket(t *testing.T) {
+func TestRunHookDeniesWhenBasaniteFlagsAnUnderBudgetTicket(t *testing.T) {
 	clean(t)
 	t.Setenv("TICKETVOICE_BASANITE", fakeSiblingBinary(t, "basanite", "load-bearing ×1 → supporting"))
 	raw := []byte(`{"session_id":"s","tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + words(20) + `"}}`)
 	out := runHookWithInput(raw)
 	if out == nil {
-		t.Fatal("basanite-flagged, under-budget ticket must still ask")
+		t.Fatal("basanite-flagged, under-budget ticket must still be denied")
 	}
-	if out.HookSpecificOutput.PermissionDecision != "ask" {
-		t.Fatalf("want ask, got %q", out.HookSpecificOutput.PermissionDecision)
+	if out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("want deny, got %q", out.HookSpecificOutput.PermissionDecision)
 	}
 	if !strings.Contains(out.HookSpecificOutput.PermissionDecisionReason, "load-bearing") {
 		t.Fatalf("reason must carry basanite's finding: %q", out.HookSpecificOutput.PermissionDecisionReason)
@@ -386,22 +387,19 @@ func TestRunHookNoTagWhenDisabled(t *testing.T) {
 	}
 }
 
-// A flagged or over-budget Linear write still carries the tag in updatedInput, so what the human
-// approves is what actually gets tagged when they say yes.
-func TestRunHookTagsFlaggedLinearWriteToo(t *testing.T) {
+// A denied write never posts, so there's nothing to tag — updatedInput is for a call that's about
+// to execute, and this one isn't. The tag only ever applies on the eventual allow, once Claude
+// retries with something that actually clears the gate.
+func TestRunHookDeniedLinearWriteCarriesNoUpdatedInput(t *testing.T) {
 	t.Setenv("TICKETVOICE_COPE_GATE", fakeSiblingBinary(t, "cope-gate", "dangling_end: 1 violation(s)"))
 	t.Setenv("TICKETVOICE_BASANITE", filepath.Join(t.TempDir(), "does-not-exist"))
 	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + words(20) + `"}}`)
 	out := runHookWithInput(raw)
-	if out == nil || out.HookSpecificOutput.PermissionDecision != "ask" {
-		t.Fatalf("want ask with a tagged updatedInput, got %+v", out)
+	if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("want deny, got %+v", out)
 	}
-	var updated map[string]any
-	if err := json.Unmarshal(out.HookSpecificOutput.UpdatedInput, &updated); err != nil {
-		t.Fatalf("updatedInput must be valid JSON: %v", err)
-	}
-	if !strings.HasPrefix(updated["description"].(string), "🤖 ") {
-		t.Fatalf("even the flagged/ask path must carry the tag, got %+v", updated)
+	if out.HookSpecificOutput.UpdatedInput != nil {
+		t.Fatalf("a denied call must carry no updatedInput, got %s", out.HookSpecificOutput.UpdatedInput)
 	}
 }
 
@@ -438,7 +436,7 @@ func TestRunHookReasonCarriesAllThreeFindingsWhenOverBudgetAndBothFlag(t *testin
 	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + words(200) + `"}}`)
 	out := runHookWithInput(raw)
 	if out == nil {
-		t.Fatal("over-budget ticket must ask")
+		t.Fatal("over-budget ticket must be denied")
 	}
 	reason := out.HookSpecificOutput.PermissionDecisionReason
 	if !strings.Contains(reason, "200 words") || !strings.Contains(reason, "forked_end") || !strings.Contains(reason, "load-bearing") {

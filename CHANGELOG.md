@@ -1,5 +1,21 @@
 # Changelog
 
+## Deny instead of ask on a flagged or over-budget write — 2026-08-29
+
+`permissionDecisionReason` for `"ask"` is shown to the user, not Claude — confirmed against the
+primary hooks doc before changing anything, not assumed. That made every flagged or over-budget
+write a human's decision, forever: the reason for `"ask"` never reaches Claude at all. `"deny"`
+reverses it — the reason goes to Claude, not a human — so a flagged Linear write now rewrites and
+retries on its own, the same way gh-write's own refusal already worked. Both surfaces do the same
+thing now, just at different points in the call's lifecycle: the hook's `deny` stops a Linear write
+or a Bash-visible gh-write call before it runs; gh-write's own refusal (a pipe body, or anything the
+hook couldn't see ahead of time) happens after, since gh-write is what the call already invoked.
+
+Consequence: the tag on a flagged/over-budget write, added earlier today, no longer applies — a
+denied call never executes, so there's nothing for `updatedInput` to tag. The tag now only appears
+on the eventual `allow`, once a retry actually clears the gate. `TICKETVOICE_MAX_WORDS` is the only
+override left; there's no per-ticket human approval anymore.
+
 ## Tag Linear writes too, via updatedInput — 2026-08-29
 
 The agent tag (🤖) added to gh-write earlier today only covered GitHub — Linear writes went out
@@ -277,6 +293,6 @@ description, 120 for a comment, fenced code excluded. Over budget it returns `pe
 "ask"` with the count and the four slots, so a genuinely long ticket stays possible and the
 assistant cannot wave its own gate through. Silent when inside the budget.
 
-Written because the register note alone did not hold — "concise, pragmatic staff engineer" was in
-force from 2026-07-20 and a 238-word body still shipped on 2026-08-04. A register is a taste; a
-word count is a limit, and it can fail.
+Written because the register note alone didn't hold — "concise, pragmatic staff engineer" was in
+force, and ticket bodies still ran long anyway, more than once. A register is a taste, and a taste
+can be talked past; a word count is a limit, and it can't.

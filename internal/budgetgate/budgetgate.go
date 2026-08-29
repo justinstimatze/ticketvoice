@@ -96,8 +96,8 @@ func BudgetFor(base int) int {
 
 // Evaluate is the one check every caller runs through: same budget math, same reason text. over
 // is false and reason is empty when the text is within budget. The reason carries the diagnostic
-// only — what to do about it differs by caller (a hook can offer a human "ask"; a CLI can only
-// refuse and explain), so that line is each caller's own to append.
+// only — what to do about it differs by caller (a hook can deny and let Claude retry; a CLI can
+// only refuse and explain), so that line is each caller's own to append.
 func Evaluate(text, kind string, budget int) (over bool, reason string) {
 	words := ProseWords(text)
 	if words <= budget {

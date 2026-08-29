@@ -1,19 +1,20 @@
-// ticketvoice is a Claude Code PreToolUse hook that holds Linear ticket prose to a word budget.
+// ticketvoice is a Claude Code PreToolUse hook that gates Linear ticket prose through cope,
+// basanite, and a word budget before it posts.
 //
-// It exists because the register note alone did not hold. A memory saying "write like a pragmatic
-// staff engineer" was in force on 2026-07-20 and a 238-word ticket body still shipped on 2026-08-04,
-// because a register is a taste and not a limit. A word count is a limit, and it can fail.
+// A memory saying "write like a pragmatic staff engineer" held, and tickets still ran long anyway —
+// a memory is a taste, and a taste can be talked past mid-generation without ever registering as a
+// violation. cope and basanite replace the taste with an actual read of the prose; the word budget
+// below catches what neither of them scores: sheer length.
 //
-// Silent when the body is inside the budget. Over budget it returns permissionDecision "ask", so the
-// human decides — a ticket that genuinely needs to be long stays possible, and the assistant cannot
-// wave its own gate through.
+// Silent when the body clears all three. Otherwise it returns permissionDecision "deny" — the reason
+// goes to Claude, not a human, so Claude retries on its own instead of paging anyone.
+// TICKETVOICE_MAX_WORDS is the only override, set ahead of time, not decided per ticket.
 //
 // Two sibling tools watch the same Linear writes — basanite (vocabulary tics) and cope (voicing and
 // structure) — and both, independently, chose never to block on their own: additionalContext only.
-// Word count alone left a real hole: a within-budget ticket carrying a flagged tic shipped with
-// nobody forced to look. This hook closes it by calling both directly, forwarding the exact bytes
-// it received to cope-gate -pretool and basanite writecheck -no-dedup and gating on their verdicts
-// too, not just the budget — see judgeCope and judgeBasanite. See CHANGELOG.md.
+// This hook closes that by calling both directly, forwarding the exact bytes it received to
+// cope-gate -pretool and basanite writecheck -no-dedup and gating on their verdicts too, not just
+// the budget — see judgeCope and judgeBasanite. See CHANGELOG.md.
 package main
 
 import (
@@ -367,13 +368,12 @@ func runHookWithInput(raw []byte) *hookOutput {
 	if basanite.Flagged {
 		reason += fmt.Sprintf("\n\nbasanite flagged this:\n\n%s", basanite.Note)
 	}
-	reason += "\n\nCut it and call again, or approve to send as written."
+	reason += "\n\nCut it and call again."
 
 	var out hookOutput
 	out.HookSpecificOutput.HookEventName = "PreToolUse"
-	out.HookSpecificOutput.PermissionDecision = "ask"
+	out.HookSpecificOutput.PermissionDecision = "deny"
 	out.HookSpecificOutput.PermissionDecisionReason = reason
-	out.HookSpecificOutput.UpdatedInput = updatedInput
 	return &out
 }
 

@@ -2,12 +2,15 @@
 
 [![ci](https://github.com/justinstimatze/ticketvoice/actions/workflows/ci.yml/badge.svg)](https://github.com/justinstimatze/ticketvoice/actions/workflows/ci.yml)
 
-A Claude Code `PreToolUse` hook that holds ticket prose to a word budget: 150 words for an issue
-or PR description, 120 for a comment, fenced code excluded. Over budget it returns
-`permissionDecision: "ask"`, so a human decides — a ticket that needs the length stays possible,
-and the assistant can't wave its own ticket through. No prompt when the body is inside the budget —
-on Linear it still tags the body as agent-authored before letting it through; see
-[Agent tag](#agent-tag).
+A Claude Code `PreToolUse` hook that gates ticket prose through
+[cope](https://github.com/justinstimatze/cope) (voicing and structure) and
+[basanite](https://github.com/justinstimatze/basanite) (vocabulary tics) before it posts. Behind
+both sits a word budget — 150 words for an issue or PR description, 120 for a comment, fenced code
+excluded — as a narrower backstop: neither cope nor basanite is built to score sheer length,
+independent of register or vocabulary. Any of the three flagging a body returns
+`permissionDecision: "deny"` — the reason goes to Claude, not a human, so it rewrites and retries on
+its own instead of paging anyone. No prompt when a body clears all three — on Linear it still tags
+the body as agent-authored before letting it through; see [Agent tag](#agent-tag).
 
 Covers two surfaces: Linear, via its MCP tools' structured `description`/`body` fields — issues,
 comments, and PR-review-thread ("diff") comments and reviews — and GitHub issues/PRs, via
@@ -21,12 +24,19 @@ genre of writing than a ticket, not a gap that was missed.
 
 ## Why
 
-A memory saying "write like a pragmatic staff engineer" held for two weeks and a 238-word ticket
-body still shipped anyway, because a register is a taste and a taste can be talked past. A word
-count is a limit, and a limit either holds or visibly fails — it can't be quietly reasoned around
-mid-generation the way a style note can.
+A memory saying "write like a pragmatic staff engineer" held, and ticket bodies still ran long
+anyway — a recurring habit, not a one-off: a memory is a taste, and a taste can be talked past
+mid-generation without ever registering as a violation. cope replaces the taste with an actual read
+of the prose — the same voicing and structure check a human reviewer would run, just automatic.
+basanite adds the vocabulary-tic layer a voicing check alone misses.
 
-## What the "ask" looks like
+Neither one judges length on its own. That's the one habit they don't catch, and the budget below
+is what holds the line on it instead.
+
+## What the denial looks like
+
+Claude sees this as the reason the write was blocked — nothing is shown to you unless Claude
+surfaces it in chat on its own. Over budget:
 
 ```
 This issue description is 238 words of prose against a 150-word budget — 88 over.
@@ -38,7 +48,19 @@ Four slots, in this order:
   4. The fix, as a code block, plus one line on how to prove it can go red.
 SHAs and file:line carry the detail; do not narrate what the reader can open.
 
-Cut it and call again, or approve to send as written.
+Cut it and call again.
+```
+
+Inside budget but flagged by cope or basanite:
+
+```
+This comment is inside the 120-word budget, but a sibling scorer flagged it on the way out.
+
+cope flagged this:
+
+clause_symmetry: 1 violation(s)
+
+Cut it and call again.
 ```
 
 ## Install
@@ -115,18 +137,19 @@ which are a different genre (a changelog, not a ticket) that this gate isn't sha
 
 A pipe-sourced body (`cat notes.txt | gh-write issue create ...`) defeats even that: seeing what a
 pipe's upstream stage would produce means running it, and a `PreToolUse` hook has no business doing
-that. So the hook doesn't try — instead, gh-write runs the same word-budget/cope/basanite check
+that. So the hook doesn't try — instead, gh-write runs the same cope/basanite/word-budget check
 itself, on the real bytes it just read off its own stdin, before it ever calls `gh`. That check
 doesn't care how the body arrived, which means it's the actual backstop for all three forms, not
-just the two the hook can see ahead of time. The difference is what happens on a hit: the hook can
-return `permissionDecision: "ask"` and let a human approve or edit before anything runs; gh-write
-finding the same problem after the Bash call already ran can only refuse and exit non-zero, with
-the same reason text, for Claude to read and retry shorter.
+just the two the hook can see ahead of time. What differs is only when each one catches it: the
+hook's `deny` stops the Bash call before it ever runs, while gh-write's own refusal happens after —
+gh-write is the thing that call invoked, so by the time it can check, the call has already started.
+Either way Claude gets the same reason text and no result but "retry shorter," with nobody paged.
 
 ## Configuration
 
-`TICKETVOICE_MAX_WORDS` overrides the budget for the current call — issue or comment. Set it in the
-hook's environment: `TICKETVOICE_MAX_WORDS=200`.
+`TICKETVOICE_MAX_WORDS` overrides the length backstop for the current call — issue or comment; it
+has no effect on cope or basanite's own verdicts. Set it in the hook's environment:
+`TICKETVOICE_MAX_WORDS=200`.
 
 `TICKETVOICE_COPE_GATE` and `TICKETVOICE_BASANITE` point at those binaries if they aren't on `PATH`.
 Missing or unreachable is not an error for either — the call just isn't scored against that sibling's
@@ -160,16 +183,17 @@ description) isn't tagged: it's a diff against prose already tagged once, not a 
 
 ## Where this sits next to cope and basanite
 
-Two other tools watch the same writes — [basanite](https://github.com/justinstimatze/basanite)
-for vocabulary tics, [cope](https://github.com/justinstimatze/cope) for voicing and structure — and
-neither blocks on its own: `additionalContext`, after the call already went out. Ticketvoice does
-block, and it isn't judging on word count alone: it forwards its own stdin to `cope-gate -pretool`
-and `basanite writecheck -no-dedup` directly and asks on either verdict too, so a within-budget
-ticket carrying a flagged tic gets held for a human the same as an over-length one. See
-[CHANGELOG.md](CHANGELOG.md) for how basanite's dedup state made this need a new flag on its side.
+[cope](https://github.com/justinstimatze/cope) and
+[basanite](https://github.com/justinstimatze/basanite) are the actual read on the prose — see
+[Why](#why) — but neither blocks on its own: they answer with `additionalContext`, after the call
+already went out, and only on Linear's own `PreToolUse` matchers. Ticketvoice is what turns their
+verdict into a gate: it forwards its own stdin to `cope-gate -pretool` and
+`basanite writecheck -no-dedup` directly and denies on either flag, whether or not the body is over
+budget — so a within-budget ticket carrying a flagged tic gets sent back to Claude the same as an
+over-length one. See [CHANGELOG.md](CHANGELOG.md) for how basanite's dedup state made this need a
+new flag on its side.
 
-Their own `PreToolUse` matchers are still Linear-only — cope's `-pretool` and basanite's
-`writecheck` aren't wired to `Bash`, so a GitHub write is never scored through their
+Neither sibling's own matcher reaches `Bash`, so a GitHub write is never scored through their
 independently-registered hooks the way a Linear call is. It's scored twice over by two other
 callers instead: ticketvoice's hook forwards its own stdin the moment it can find a heredoc or
 `< file` body ahead of the `gh` call, and gh-write forwards the real body bytes itself right
@@ -183,7 +207,7 @@ gofmt, vet, test, `make check-readme`, plus a non-blocking CodeScene delta check
 `PATH`.
 
 `make check-readme` runs the tool's own gate against the Why section above, as if it were a Linear
-issue description — the one paragraph in this file written in ticket-body register, so it's the
+issue description — the one passage in this file written in ticket-body register, so it's the
 only fair target. Same convention as cope's `make check-readme` (`cope-gate --check README.md`) and
 [effigy](https://github.com/justinstimatze/effigy)'s `generate_readme.py`, narrowed to what this
 tool does: it doesn't generate prose, so there's nothing to write through it, only something to

@@ -114,13 +114,13 @@ func TestRunForwardsFlagsAndStdinToGh(t *testing.T) {
 	noSiblings(t)
 	fakeGhOnPath(t)
 	var out, errb bytes.Buffer
-	code := run([]string{"issue", "create", "--title", "Bug: X", "--repo", "wovim/wovim"},
+	code := run([]string{"issue", "create", "--title", "Bug: X", "--repo", "octocat/hello-world"},
 		strings.NewReader("body text here"), &out, &errb)
 	if code != 0 {
 		t.Fatalf("want exit 0, got %d stderr=%q", code, errb.String())
 	}
 	got := out.String()
-	if !strings.Contains(got, "ARGS:issue create --title Bug: X --repo wovim/wovim --body-file -") {
+	if !strings.Contains(got, "ARGS:issue create --title Bug: X --repo octocat/hello-world --body-file -") {
 		t.Fatalf("gh-write did not forward the expected args: %q", got)
 	}
 	if !strings.Contains(got, "STDIN:"+budgetgate.AgentTag+"body text here") {

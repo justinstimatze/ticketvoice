@@ -21,7 +21,8 @@
 // redirect in the Bash command string it's watching; a pipe-sourced body (`... | gh-write ...`)
 // defeats that entirely. gh-write doesn't have that limit, since by the time it runs it already
 // holds the actual bytes regardless of how they arrived — so this is the backstop that closes
-// the gap the hook structurally can't, at the cost of a CLI failure instead of a human "ask".
+// the gap the hook structurally can't, at the cost of catching it after the Bash call already
+// started instead of stopping it before it runs.
 //
 // Every body gh-write sends is also prefixed with an agent tag (🤖) by default, since it's
 // posted under the operator's own GitHub account — set TICKETVOICE_NO_AGENT_TAG to turn that off.
