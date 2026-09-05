@@ -85,15 +85,67 @@ func TestExistsNonOKStatusFailsOpen(t *testing.T) {
 	}
 }
 
+// isolateHome points os.UserHomeDir() (env var HOME on unix) at an empty temp dir, so a test
+// asserting "no token anywhere" isn't silently made true or false by whatever this developer's
+// actual ~/.config/ticketvoice/.env happens to contain.
+func isolateHome(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+}
+
 func TestNewRequiresToken(t *testing.T) {
+	isolateHome(t)
 	t.Setenv("TICKETVOICE_LINEAR_TOKEN", "")
-	if _, ok := New(); ok {
-		t.Fatal("New must report ok=false with no token set")
+	if _, ok := New(""); ok {
+		t.Fatal("New must report ok=false with no token set anywhere")
 	}
 	t.Setenv("TICKETVOICE_LINEAR_TOKEN", "lin_api_x")
-	c, ok := New()
+	c, ok := New("")
 	if !ok || c.Endpoint != defaultEndpoint {
 		t.Fatalf("want ok=true with the default endpoint, got ok=%v endpoint=%q", ok, c.Endpoint)
+	}
+}
+
+// The global ~/.config/ticketvoice/.env fallback is the one that matters most for a hook wired
+// into every project's settings.json: it's what lets the same token resolve no matter which
+// project's cwd the hook is currently handling a call for.
+func TestNewFallsBackToGlobalConfigFile(t *testing.T) {
+	isolateHome(t)
+	t.Setenv("TICKETVOICE_LINEAR_TOKEN", "")
+	home := os.Getenv("HOME")
+	dir := filepath.Join(home, ".config", "ticketvoice")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("TICKETVOICE_LINEAR_TOKEN=\"lin_api_global\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, ok := New(filepath.Join(t.TempDir(), "some", "project", "subdir"))
+	if !ok {
+		t.Fatal("want the global config file to resolve a token from an unrelated cwd")
+	}
+}
+
+// A .env found by walking up from cwd takes priority over the global fallback — a project-local
+// override should win where one exists.
+func TestNewPrefersCwdEnvOverGlobalConfigFile(t *testing.T) {
+	isolateHome(t)
+	t.Setenv("TICKETVOICE_LINEAR_TOKEN", "")
+	home := os.Getenv("HOME")
+	globalDir := filepath.Join(home, ".config", "ticketvoice")
+	if err := os.MkdirAll(globalDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(globalDir, ".env"), []byte("TICKETVOICE_LINEAR_TOKEN=global\n"), 0o600)
+
+	project := t.TempDir()
+	sub := filepath.Join(project, "sub", "dir")
+	os.MkdirAll(sub, 0o755)
+	os.WriteFile(filepath.Join(project, ".env"), []byte("TICKETVOICE_LINEAR_TOKEN=local\n"), 0o600)
+
+	c, ok := New(sub)
+	if !ok || c.Token != "local" {
+		t.Fatalf("want the project-local .env to win, got ok=%v token=%q", ok, c.Token)
 	}
 }
 

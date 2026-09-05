@@ -466,7 +466,7 @@ func runHookWithInput(raw []byte) *hookOutput {
 	budget := budgetFor(rawBudget)
 	over, budgetReason := evaluate(text, kind, budget)
 
-	linear, _ := linearclient.New() // nil, ok=false when TICKETVOICE_LINEAR_TOKEN is unset — every
+	linear, _ := linearclient.New(in.Cwd) // nil, ok=false when no token is found anywhere — every
 	// caller below already treats a nil client as "skip this check," the same fail-open posture a
 	// missing cope-gate/basanite binary gets.
 

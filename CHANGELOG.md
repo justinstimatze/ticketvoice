@@ -1,5 +1,18 @@
 # Changelog
 
+## Resolve TICKETVOICE_LINEAR_TOKEN from a config file, not just the env var — 2026-09-05
+
+An env var only reaches the hook when it's set in whatever shell launched Claude Code — real for
+one terminal, invisible to every other project's session, and to a hook wired into
+`~/.claude/settings.json` and invoked fresh across every worktree with no shared shell at all.
+`internal/linearclient.loadToken` now resolves the token the same way hindcast resolves
+`ANTHROPIC_API_KEY` (`cmd_eval_api.go`'s `loadAPIKey`, confirmed a real cross-project convention —
+its own doc comment says it mirrors slimemold's `internal/config.Load`): the env var first, then a
+`.env` found by walking up from the call's `cwd`, then a global `~/.config/ticketvoice/.env`. The
+global tier is the one that matters here, for the same reason it mattered to hindcast's
+always-on judge — it's what lets one token resolve for every worktree under a project, not just
+whichever one happens to have its own `.env`.
+
 ## Impact line, and ground-truth citation checks — 2026-09-05
 
 Two new checks, from an adversarial panel review of 60 real Linear tickets against this gate:

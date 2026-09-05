@@ -269,8 +269,13 @@ own state.
 
 `TICKETVOICE_LINEAR_TOKEN` is a Linear personal API key (`lin_api_...`), sent raw with no `Bearer`
 prefix — the same kind of token an operator already has for Linear's own MCP server, just read
-from its own env var so the two never collide. Unset, the ticket-id half of [Ground-truth
-citations](#ground-truth-citations) skips. `TICKETVOICE_LINEAR_ENDPOINT` overrides the GraphQL
+from its own env var so the two never collide. Missing everywhere, the ticket-id half of
+[Ground-truth citations](#ground-truth-citations) skips. Resolved the same way hindcast resolves
+`ANTHROPIC_API_KEY`: the env var first, then a `.env` file found by walking up from the call's
+`cwd`, then a global fallback at `~/.config/ticketvoice/.env` (one `TICKETVOICE_LINEAR_TOKEN=...`
+line, `#`-comments allowed, quotes optional) — the global file is what lets one hook wired into
+every project's `settings.json` resolve a token regardless of which project's `cwd` it's currently
+handling a call for, worktrees included. `TICKETVOICE_LINEAR_ENDPOINT` overrides the GraphQL
 endpoint (mainly for tests). `TICKETVOICE_LINEAR_CITE_CAP` (default `5`) caps how many distinct
 ticket ids get checked per call.
 
