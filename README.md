@@ -9,8 +9,10 @@ both sits a word budget — 150 words for an issue or PR description, 120 for a 
 excluded — as a narrower backstop: neither cope nor basanite is built to score sheer length,
 independent of register or vocabulary. Any of the checks flagging a body returns
 `permissionDecision: "deny"` — the reason goes to Claude, not a human, so it rewrites and retries on
-its own instead of paging anyone. No prompt when a body clears every check — on Linear it still tags
-the body as agent-authored before letting it through; see [Agent tag](#agent-tag).
+its own instead of paging anyone — **or, on a Linear write, ticketvoice fixes it itself first: see
+[Auto-rewrite](#auto-rewrite), on by default and the one check here that spends real money without
+being asked.** No prompt when a body clears every check — on Linear it still tags the body as
+agent-authored before letting it through; see [Agent tag](#agent-tag).
 
 Two more checks, both first-party (built here, not delegated to a sibling binary): an issue
 description must state its user-facing impact in plain language — see [Impact
@@ -93,6 +95,48 @@ session id, so it has nothing to key a retry sequence on — every gh-write refu
 
 `TICKETVOICE_STATE_DIR` overrides where the attempt state lives; see
 [Configuration](#configuration).
+
+## Auto-rewrite
+
+**On by default, and it spends real money the moment a Linear write is flagged** — this is the one
+check in this whole tool that makes a paid API call automatically, without you asking for it, per
+write. Read this section before assuming a flagged write is free.
+
+The deny-and-retry loop above depends on whichever Claude session made the write choosing to
+rewrite and resubmit on its own — reliable most of the time, not always: sometimes the calling
+session asks the operator to fix the ticket by hand instead of retrying, which defeats the point of
+routing the reason back to the model at all. For the categories a rewrite can actually fix — a
+`cope`- or `basanite`-flagged voice/vocabulary issue, or over-budget length — ticketvoice fixes the
+text itself, inside the hook, before ever denying:
+
+1. One bounded call to `claude-sonnet-5` (`TICKETVOICE_REWRITE_MODEL` overrides), given the original
+   text and the specific violation(s) it was flagged for.
+2. The candidate is re-validated against **every** check the original text went through — not just
+   the ones that triggered the rewrite, since a rewrite that trims a paragraph could just as easily
+   mangle a citation or delete an impact line that was there.
+3. Only if the candidate comes back fully clean does the write proceed — `allow`, with the
+   rewritten, 🤖-tagged text substituted in via `updatedInput`. Nothing is shown to you, and nothing
+   asks the calling Claude session to do anything.
+
+If the rewrite call fails, times out, or the candidate still doesn't pass every check, the write
+falls through to today's deny-and-retry behavior exactly as if auto-rewrite didn't exist — same
+reason text, same attempt-state bookkeeping.
+
+**Deliberately excluded, not an oversight:**
+- **Ground-truth citation violations** ([below](#ground-truth-citations)) — a nonexistent ticket id,
+  file, or SHA has no correct rewrite to guess. Still denies and retries as before.
+- **A missing impact line** ([below](#impact-line)) — inventing a user-facing impact claim risks
+  shipping a fabricated fact into a ticket a PM/exec and a release-notes-generating agent both read
+  at face value. Still denies and retries as before.
+- **`Bash`/`gh-write` writes** — that surface fails synchronously in the same turn the calling agent
+  sees it (`gh-write`'s own exit-nonzero path), not a hook deny that can drift into asking a human;
+  there's also no single structured field a rewrite could be substituted into on a shell command.
+- **A patch** (editing an existing description) — same reason: no single field to substitute a
+  rewrite into.
+
+Requires `ANTHROPIC_API_KEY` resolvable — see [Configuration](#configuration) for how. Unset, this
+whole feature skips and every flagged Linear write falls straight back to deny-and-retry.
+`TICKETVOICE_NO_AUTOREWRITE` turns it off explicitly, even with a key present.
 
 ## Impact line
 
@@ -282,6 +326,13 @@ ticket ids get checked per call.
 `TICKETVOICE_NO_IMPACT_CHECK` and `TICKETVOICE_NO_CITATION_CHECK` disable
 [Impact line](#impact-line) and [Ground-truth citations](#ground-truth-citations) independently of
 each other and of the Linear token.
+
+`ANTHROPIC_API_KEY` (send-real-money — see [Auto-rewrite](#auto-rewrite) before setting this)
+resolves the same way `TICKETVOICE_LINEAR_TOKEN` does — env var, then a `.env` walked up from `cwd`,
+then the same global `~/.config/ticketvoice/.env` fallback (a second line in that file, alongside
+the Linear token). `TICKETVOICE_REWRITE_MODEL` (default `claude-sonnet-5`) and
+`TICKETVOICE_ANTHROPIC_ENDPOINT` (mainly for tests) override the model and API endpoint.
+`TICKETVOICE_NO_AUTOREWRITE` disables auto-rewrite outright.
 
 ## What it counts
 

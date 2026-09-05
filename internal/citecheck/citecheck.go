@@ -181,10 +181,66 @@ func lineCount(data []byte) int {
 	return n
 }
 
+// trackedFiles lists cwd's git-tracked files (respecting .gitignore, so vendored/node_modules
+// noise never appears), used as the basename-fallback search space for judgeFileLines. Returns
+// nil on any failure — the caller must treat that as "no fallback available," not "no files exist."
+func trackedFiles(ctx context.Context, cwd string) []string {
+	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", "-C", cwd, "ls-files").Output()
+	if err != nil {
+		return nil
+	}
+	trimmed := strings.TrimRight(string(out), "\n")
+	if trimmed == "" {
+		return nil
+	}
+	return strings.Split(trimmed, "\n")
+}
+
+// resolveByBasename finds the unique tracked file whose base name matches base — a citation
+// written as a bare filename shorthand (`auth.ts:294` when the real file is
+// web/src/lib/chat/server/auth.ts) is a real, observed pattern in ticket prose, not hypothetical.
+// ambiguous is true when 2+ tracked files share that basename: which one the citation meant isn't
+// this check's call to guess, so the caller must treat that as "can't determine," not "missing."
+func resolveByBasename(files []string, base string) (resolved string, ambiguous bool) {
+	var match string
+	count := 0
+	for _, f := range files {
+		if filepath.Base(f) == base {
+			match = f
+			count++
+		}
+	}
+	switch {
+	case count == 1:
+		return match, false
+	case count > 1:
+		return "", true
+	default:
+		return "", false
+	}
+}
+
 // judgeFileLines checks each backtick-fenced `path:line` or `path:start-end` citation. A path
 // with no extension (Makefile, Dockerfile) doesn't match fileLinePattern at all — a known,
-// accepted v1 gap, not silently mishandled.
+// accepted v1 gap, not silently mishandled. When the literal path doesn't resolve, and cwd is a
+// git repo, falls back to a basename search over the repo's tracked files before flagging —
+// ticket prose regularly cites a file by shorthand (`auth.ts`) rather than its full path.
 func judgeFileLines(cwd, text string) (notes []string, ids []string) {
+	var files []string
+	var filesLoaded bool
+	loadFiles := func() []string {
+		if !filesLoaded {
+			filesLoaded = true
+			ctx := context.Background()
+			if isGitRepo(ctx, cwd) {
+				files = trackedFiles(ctx, cwd)
+			}
+		}
+		return files
+	}
+
 	for _, m := range fileLinePattern.FindAllStringSubmatch(text, -1) {
 		path, lineStr, endStr := m[1], m[2], m[3]
 		full, ok := resolvePath(cwd, path)
@@ -203,6 +259,16 @@ func judgeFileLines(cwd, text string) (notes []string, ids []string) {
 		}
 
 		fi, err := os.Stat(full)
+		if err != nil {
+			rel, ambiguous := resolveByBasename(loadFiles(), filepath.Base(path))
+			if ambiguous {
+				continue // 2+ tracked files share this basename; can't tell which was meant
+			}
+			if rel != "" {
+				full = filepath.Join(cwd, rel)
+				fi, err = os.Stat(full)
+			}
+		}
 		if err != nil {
 			notes = append(notes, fmt.Sprintf("%s doesn't exist", path))
 			ids = append(ids, "cite:file:"+path)
@@ -245,10 +311,20 @@ func shaExists(ctx context.Context, cwd, sha string) bool {
 	return cmd.Run() == nil
 }
 
-// judgeSHAs checks each backtick-fenced 7-40 hex-character citation against the local repo at
-// cwd. Skips entirely when cwd is unset, git isn't installed, or cwd isn't a repo — a SHA belongs
-// to a specific project's history, and this can only check the one the hook is already sitting
-// in.
+// plausibleSHALen reports whether n is a length a person actually writes for a git commit
+// reference: a full SHA (40) or a realistic abbreviation (7-12, git's own historical minimum
+// through the longest abbreviation any repo short of Linux-kernel scale ever needs). The 13-39
+// range is excluded on purpose — nobody hand-abbreviates to an odd length in that gap, but it's
+// exactly where other systems' hex-shaped ids land (a 24-char Mongo-style ObjectId, e.g., matched
+// citecheck's old 7-40 range and got misread as a commit reference; confirmed against a real
+// ticket citing three 24-hex conversation ids, none of them SHAs).
+func plausibleSHALen(n int) bool {
+	return n == 40 || (n >= 7 && n <= 12)
+}
+
+// judgeSHAs checks each backtick-fenced, SHA-shaped citation against the local repo at cwd. Skips
+// entirely when cwd is unset, git isn't installed, or cwd isn't a repo — a SHA belongs to a
+// specific project's history, and this can only check the one the hook is already sitting in.
 func judgeSHAs(cwd, text string) (notes []string, ids []string) {
 	if cwd == "" {
 		return nil, nil
@@ -260,7 +336,7 @@ func judgeSHAs(cwd, text string) (notes []string, ids []string) {
 	seen := map[string]bool{}
 	for _, m := range shaPattern.FindAllStringSubmatch(text, -1) {
 		sha := m[1]
-		if seen[sha] {
+		if !plausibleSHALen(len(sha)) || seen[sha] {
 			continue
 		}
 		seen[sha] = true

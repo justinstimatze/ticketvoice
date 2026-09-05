@@ -10,7 +10,6 @@
 package linearclient
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -19,10 +18,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/justinstimatze/ticketvoice/internal/attemptstate"
+	"github.com/justinstimatze/ticketvoice/internal/tokensrc"
 )
 
 const defaultEndpoint = "https://api.linear.app/graphql"
@@ -54,61 +53,11 @@ func New(cwd string) (c *Client, ok bool) {
 	return &Client{Token: token, Endpoint: endpoint, HTTP: &http.Client{Timeout: timeout}}, true
 }
 
-// loadToken resolves the Linear token the same way hindcast's loadAPIKey resolves
-// ANTHROPIC_API_KEY, and for the same reason: env var first, then a .env file found by walking
-// up from cwd, then a global ~/.config/ticketvoice/.env — the global fallback is what lets a
-// hook wired into every project's settings.json resolve a token regardless of which project's
-// cwd it's currently handling a call for; a per-repo .env only helps when cwd is at/under that
-// one repo.
+// loadToken resolves the Linear token via tokensrc.Resolve — env var first, then a .env file
+// found by walking up from cwd, then a global ~/.config/ticketvoice/.env. See tokensrc's own doc
+// comment for why the global fallback matters for a hook wired into every project's settings.json.
 func loadToken(cwd string) string {
-	if v := os.Getenv("TICKETVOICE_LINEAR_TOKEN"); v != "" {
-		return stripQuotes(v)
-	}
-	for dir := cwd; dir != ""; {
-		if v := readEnvFrom(filepath.Join(dir, ".env")); v != "" {
-			return v
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		if v := readEnvFrom(filepath.Join(home, ".config", "ticketvoice", ".env")); v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
-func readEnvFrom(path string) string {
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if v, ok := strings.CutPrefix(line, "TICKETVOICE_LINEAR_TOKEN="); ok {
-			return stripQuotes(strings.TrimSpace(v))
-		}
-	}
-	return ""
-}
-
-// stripQuotes lets `TICKETVOICE_LINEAR_TOKEN="lin_api_..."` work the same as an unquoted value.
-func stripQuotes(s string) string {
-	if len(s) >= 2 {
-		if (s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'') {
-			return s[1 : len(s)-1]
-		}
-	}
-	return s
+	return tokensrc.Resolve(cwd, "TICKETVOICE_LINEAR_TOKEN")
 }
 
 type gqlRequest struct {

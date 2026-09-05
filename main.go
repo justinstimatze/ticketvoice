@@ -35,8 +35,10 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/justinstimatze/ticketvoice/internal/attemptstate"
+	"github.com/justinstimatze/ticketvoice/internal/autorewrite"
 	"github.com/justinstimatze/ticketvoice/internal/budgetgate"
 	"github.com/justinstimatze/ticketvoice/internal/citecheck"
 	"github.com/justinstimatze/ticketvoice/internal/impactline"
@@ -371,6 +373,39 @@ func taggedLinearInput(tool string, raw json.RawMessage, kind string) json.RawMe
 	return out
 }
 
+// taggedRewrite substitutes an auto-rewritten candidate for the original field's value — unlike
+// taggedLinearInput, whose entire job IS the tag, so it returns nil when tagging is disabled.
+// Here the substitution is the job, and the tag is secondary: returning nil on a disabled tag would
+// silently let an already-flagged original body through unmodified whenever TICKETVOICE_NO_AGENT_TAG
+// is set, defeating the whole feature. So the field is always replaced with candidate, prefixed
+// with the tag only when AgentTagEnabled() is true. nil is reserved for a genuine failure to
+// determine the field or round-trip the input as an object — the caller already treats that as
+// ok=false, never as "let the original text through."
+func taggedRewrite(tool string, raw json.RawMessage, kind, candidate string) json.RawMessage {
+	field := linearTagField(tool, kind)
+	if field == "" {
+		return nil
+	}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil {
+		return nil
+	}
+	val := candidate
+	if budgetgate.AgentTagEnabled() {
+		val = budgetgate.AgentTag + val
+	}
+	tagged, err := json.Marshal(val)
+	if err != nil {
+		return nil
+	}
+	obj[field] = tagged
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
 // retryNowLine replaces the old "Cut it and call again," which told the model what to do but not
 // what to refrain from. The observed failure was Claude choosing to ask the operator to rewrite
 // the ticket by hand instead of retrying itself, so the line has to name that choice, not just the
@@ -439,6 +474,86 @@ func stalledNote(kind string, attempt int, cope, basanite, impact budgetgate.Jud
 		fmt.Fprintf(&b, "\n\n%s", impact.Note)
 	}
 	return b.String()
+}
+
+// tryAutoRewrite attempts one auto-fix for a flagged Linear write, replacing "deny and hope the
+// calling agent retries" with "rewrite, verify, then allow" for the categories a rewrite can
+// actually fix (over-budget length, a cope voice/structure hit, a basanite vocabulary tic).
+// Returns ok=false — meaning "fall through to today's deny-and-retry behavior, unchanged" — for
+// anything not a Linear MCP tool (a Bash/gh-write call has no field to apply a rewrite to), a
+// patch (same reason), any check outside the auto-fixable set (citations, impact — see the plan's
+// Context section for why those are excluded on purpose), a missing autorewrite client, or a
+// rewrite whose candidate doesn't fully re-validate clean. Never touches internal/attemptstate —
+// only runHookWithInput does, exactly once, on whichever branch actually runs.
+func tryAutoRewrite(in hookInput, kind, text string, over bool, budgetReason string, budget int,
+	cope, basanite, citations, impact budgetgate.Judgment, linear *linearclient.Client,
+	rewriter *autorewrite.Client) (candidate json.RawMessage, ok bool) {
+
+	if !strings.HasPrefix(in.ToolName, "mcp__linear__") {
+		return nil, false
+	}
+	if citations.Flagged || impact.Flagged {
+		return nil, false
+	}
+	if linearTagField(in.ToolName, kind) == "" {
+		return nil, false
+	}
+	if !over && !cope.Flagged && !basanite.Flagged {
+		return nil, false
+	}
+	if rewriter == nil {
+		return nil, false
+	}
+
+	var violations []string
+	if over {
+		violations = append(violations, budgetReason)
+	}
+	if cope.Flagged {
+		violations = append(violations, cope.Note)
+	}
+	if basanite.Flagged {
+		violations = append(violations, basanite.Note)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	rewritten, err := rewriter.Rewrite(ctx, kind, text, violations)
+	if err != nil {
+		return nil, false
+	}
+
+	// Re-validate the CANDIDATE against every check the original text went through, not just the
+	// ones that triggered the rewrite — concurrently, so this second pass doesn't stack on top of
+	// the rewrite call's own 8s. A rewrite that trims a paragraph could just as easily mangle a
+	// citation or delete an impact line that was there.
+	var newCope, newBasanite, newCitations budgetgate.Judgment
+	var wg sync.WaitGroup
+	wg.Add(3)
+	candPayload := budgetgate.LinearPayload(kind, rewritten)
+	go func() { defer wg.Done(); newCope = judgeCope(candPayload) }()
+	go func() { defer wg.Done(); newBasanite = judgeBasanite(candPayload) }()
+	go func() {
+		defer wg.Done()
+		newCitations, _ = citecheck.Judge(context.Background(), linear, in.Cwd, rewritten)
+	}()
+	wg.Wait()
+
+	if newOver, _ := evaluate(rewritten, kind, budget); newOver {
+		return nil, false
+	}
+	if newCope.Flagged || newBasanite.Flagged || newCitations.Flagged {
+		return nil, false
+	}
+	if kind == "issue description" && impactline.Judge(rewritten).Flagged {
+		return nil, false
+	}
+
+	out := taggedRewrite(in.ToolName, in.ToolInput, kind, rewritten)
+	if out == nil {
+		return nil, false
+	}
+	return out, true
 }
 
 // runHookWithInput is the hook's decision logic, taking the raw bytes so the same bytes can be
@@ -520,6 +635,21 @@ func runHookWithInput(raw []byte) *hookOutput {
 		out.HookSpecificOutput.PermissionDecision = "allow"
 		out.HookSpecificOutput.UpdatedInput = updatedInput
 		return &out
+	}
+
+	// Try to fix it instead of denying it, before any attempt-counting starts — see
+	// tryAutoRewrite's own doc comment for the exact scope this covers. TICKETVOICE_NO_AUTOREWRITE
+	// skips even resolving a client, so a set flag costs nothing beyond the check itself.
+	if os.Getenv("TICKETVOICE_NO_AUTOREWRITE") == "" {
+		rewriter, _ := autorewrite.New(in.Cwd)
+		if candidate, ok := tryAutoRewrite(in, kind, text, over, budgetReason, budget, cope, basanite, citations, impact, linear, rewriter); ok {
+			attemptstate.Clear(key)
+			var out hookOutput
+			out.HookSpecificOutput.HookEventName = "PreToolUse"
+			out.HookSpecificOutput.PermissionDecision = "allow"
+			out.HookSpecificOutput.UpdatedInput = candidate
+			return &out
+		}
 	}
 
 	var impactIDs []string

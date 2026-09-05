@@ -1,5 +1,66 @@
 # Changelog
 
+## Auto-rewrite flagged Linear writes instead of denying them — 2026-09-05
+
+`FEEDBACK.md` (2026-09-04) named a real gap in the deny-and-retry design: the reason is supposed to
+go to Claude, not a human, but sometimes the calling session asks the operator to fix the ticket by
+hand instead of retrying — the earlier 3-attempt escalation narrows the window for that but can't
+force it, since it's advisory text aimed at another agent's judgment, not a mechanical gate. For the
+categories a rewrite can actually fix — over-budget length, a cope or basanite flag — `internal/
+autorewrite` now makes one bounded call to fix the text itself before ever denying, then
+re-validates the candidate against every check (not just the ones that triggered the rewrite) before
+letting it through. Citations and the impact line stay deny-and-retry, deliberately: neither has a
+correct auto-fix ticketvoice could guess.
+
+Hand-rolled `net/http`, not the official Anthropic SDK — checked the SDK's own `go.mod` first and
+found it pulls in ~50 transitive packages (AWS SDK v2, gRPC, protobuf, OpenTelemetry, two YAML
+libraries, `testify`) for a project that's been stdlib-only since it started. `basanite/internal/
+judge/cell.go` already solves this exact problem (a live, latency-sensitive, forced-tool-use
+Anthropic call) with a hand-rolled request over `net/http`, so this follows that precedent instead —
+same shape (explicit timeout, no retry, forced tool-use, ephemeral `cache_control`), a different
+model (Sonnet 5 here, since this is generation, not cell.go's classification) and a bigger
+`max_tokens` (cell.go's `512` was sized for a one-word verdict, not a full ticket body).
+
+Two things caught only by testing against the real API, not assumed from `cell.go`'s example:
+
+- `temperature: 0` (copied straight from `cell.go`) gets a `400: "temperature is deprecated for
+  this model"` on `claude-sonnet-5` — current-generation models reject sampling params outright.
+  `cell.go`'s Haiku model predates that; the field is dropped entirely here.
+- The re-validation pass runs cope, basanite, and citecheck concurrently against the rewrite
+  candidate, mirroring the hook's existing first-pass concurrency — a sequential re-check would
+  stack on top of the rewrite call's own latency instead of overlapping it.
+
+`internal/linearclient`'s token-resolution helpers moved to a new `internal/tokensrc` package so
+`ANTHROPIC_API_KEY` and `TICKETVOICE_LINEAR_TOKEN` share one implementation instead of a second copy
+of the same env-var/`.env`-walk/global-fallback chain.
+
+On by default once `ANTHROPIC_API_KEY` resolves — the first check in this tool that spends real,
+metered money automatically, without a per-write ask. `TICKETVOICE_NO_AUTOREWRITE` turns it off.
+
+## Fix two citecheck false positives found on real, live ticket bodies — 2026-09-05
+
+Both surfaced from a read-only audit of `aipotluck.org`'s cycle-3 tickets through the checks built
+earlier the same day, and one was independently confirmed live by that project's own session
+hitting the same bug class on a different ticket the same day:
+
+- **File:line citations resolved only by exact path.** CUR-886 cited `` `auth.ts:294-303` `` — the
+  real file is `web/src/lib/chat/server/auth.ts`, and citecheck flagged it as missing because it
+  only ever checked the literal path given. `judgeFileLines` now falls back to a `git ls-files`
+  basename search when the literal path misses, resolving a citation only when exactly one tracked
+  file matches that basename — an ambiguous match (2+ files sharing it) fails open rather than
+  guessing which one was meant.
+- **The SHA check's 7-40 hex-character range caught non-SHA hex ids.** CUR-855 cited three 24-hex
+  conversation ids that got misread as commit references. `judgeSHAs` now only treats a 40-char
+  (full) or 7-12-char (realistic abbreviation) hex string as a plausible SHA candidate — the 13-39
+  range is exactly where other systems' ids (24-char ObjectId-shaped, in this case) collide with the
+  old range, and nobody hand-abbreviates a commit to an odd length in that gap.
+
+**Known residual gap, not fixed here:** `aipotluck.org`'s own session hit a fresh case the length
+fix doesn't cover — a 12-character `agent-service` task id, which falls inside the plausible
+abbreviated-SHA range and still misreports as a nonexistent commit. Any short hex string is
+genuinely ambiguous between a git SHA and some other system's id; there's no clean length-based fix
+left for that case.
+
 ## Resolve TICKETVOICE_LINEAR_TOKEN from a config file, not just the env var — 2026-09-05
 
 An env var only reaches the hook when it's set in whatever shell launched Claude Code — real for

@@ -135,6 +135,80 @@ func TestJudgeFileLineSkipsRelativePathWithNoCwd(t *testing.T) {
 	}
 }
 
+// setupGitRepoWithFile creates a git repo with one file at a nested path and commits it, so
+// trackedFiles (git ls-files) has something real to search.
+func setupGitRepoWithFile(t *testing.T, relPath, content string) string {
+	t.Helper()
+	dir := t.TempDir()
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t.com", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t.com")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	full := filepath.Join(dir, relPath)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("init", "-q")
+	run("add", relPath)
+	run("commit", "-q", "-m", "init")
+	return dir
+}
+
+// Real case from a 2026-09-05 audit of live ticket bodies: CUR-886 cited `auth.ts:294-303` where
+// the real file is web/src/lib/chat/server/auth.ts — a bare basename shorthand, not a broken
+// reference. The literal-path check alone flagged this as missing; the basename fallback fixes it.
+func TestJudgeFileLineResolvesBareBasename(t *testing.T) {
+	dir := setupGitRepoWithFile(t, "web/src/lib/chat/server/auth.ts", "line1\nline2\nline3\n")
+	j, _ := Judge(context.Background(), nil, dir, "See `auth.ts:2` for the bug.")
+	if j.Flagged {
+		t.Fatalf("a bare basename matching exactly one tracked file must resolve clean, got %s", j.Note)
+	}
+}
+
+func TestJudgeFileLineBareBasenameStillCatchesOutOfRangeLine(t *testing.T) {
+	dir := setupGitRepoWithFile(t, "web/src/lib/chat/server/auth.ts", "line1\nline2\nline3\n")
+	j, _ := Judge(context.Background(), nil, dir, "See `auth.ts:99` for the bug.")
+	if !j.Flagged || !strings.Contains(j.Note, "3 lines") {
+		t.Fatalf("basename resolution must still check the real line count, got %+v", j)
+	}
+}
+
+func TestJudgeFileLineAmbiguousBasenameFailsOpen(t *testing.T) {
+	dir := t.TempDir()
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t.com", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t.com")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	for _, rel := range []string{"a/auth.ts", "b/auth.ts"} {
+		full := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run("init", "-q")
+	run("add", "a/auth.ts", "b/auth.ts")
+	run("commit", "-q", "-m", "init")
+
+	j, _ := Judge(context.Background(), nil, dir, "See `auth.ts:1` for the bug.")
+	if j.Flagged {
+		t.Fatalf("two tracked files sharing a basename must fail open rather than guess, got %s", j.Note)
+	}
+}
+
 // git behavior confirmed by direct test before writing this: both "not a repo" and "SHA doesn't
 // exist" exit `git cat-file -e <sha>^{commit}` at code 128 — indistinguishable without first
 // confirming cwd is actually a repo.
@@ -191,6 +265,25 @@ func TestJudgeSHASkipsWithNoCwd(t *testing.T) {
 	j, _ := Judge(context.Background(), nil, "", "Fixed in `deadbeef1234`.")
 	if j.Flagged {
 		t.Fatalf("with no cwd, SHA checking must skip entirely, got %s", j.Note)
+	}
+}
+
+// Real case from a 2026-09-05 audit of live ticket bodies: CUR-855 cited three 24-hex-character
+// conversation ids (Mongo-ObjectId-shaped, not git SHAs) that happened to match the old 7-40 hex
+// range and got misreported as nonexistent commits.
+func TestJudgeSHAIgnoresImplausibleLengthHexIDs(t *testing.T) {
+	dir, _ := setupGitRepo(t)
+	j, ids := Judge(context.Background(), nil, dir, "Seen in `6a984bfbf207350b3e3a5fe9`, English.")
+	if j.Flagged || ids != nil {
+		t.Fatalf("a 24-hex-char id outside the plausible SHA-length range must never be checked, got %+v ids=%v", j, ids)
+	}
+}
+
+func TestJudgeSHAStillFlagsFullLengthBogusSHA(t *testing.T) {
+	dir, _ := setupGitRepo(t)
+	j, ids := Judge(context.Background(), nil, dir, "Fixed in `"+strings.Repeat("d", 40)+"`.")
+	if !j.Flagged || len(ids) != 1 {
+		t.Fatalf("a full 40-char bogus SHA must still be checked and flagged, got %+v ids=%v", j, ids)
 	}
 }
 
