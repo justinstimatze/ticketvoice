@@ -7,10 +7,16 @@ A Claude Code `PreToolUse` hook that gates ticket prose through
 [basanite](https://github.com/justinstimatze/basanite) (vocabulary tics) before it posts. Behind
 both sits a word budget — 150 words for an issue or PR description, 120 for a comment, fenced code
 excluded — as a narrower backstop: neither cope nor basanite is built to score sheer length,
-independent of register or vocabulary. Any of the three flagging a body returns
+independent of register or vocabulary. Any of the checks flagging a body returns
 `permissionDecision: "deny"` — the reason goes to Claude, not a human, so it rewrites and retries on
-its own instead of paging anyone. No prompt when a body clears all three — on Linear it still tags
+its own instead of paging anyone. No prompt when a body clears every check — on Linear it still tags
 the body as agent-authored before letting it through; see [Agent tag](#agent-tag).
+
+Two more checks, both first-party (built here, not delegated to a sibling binary): an issue
+description must state its user-facing impact in plain language — see [Impact
+line](#impact-line) — and any ticket-id, file:line, or commit SHA a ticket cites gets verified
+against Linear, the local filesystem, and the local git repo, not trusted at face value — see
+[Ground-truth citations](#ground-truth-citations).
 
 Covers two surfaces: Linear, via its MCP tools' structured `description`/`body` fields — issues,
 comments, and PR-review-thread ("diff") comments and reviews — and GitHub issues/PRs, via
@@ -48,7 +54,8 @@ Four slots, in this order:
   4. The fix, as a code block, plus one line on how to prove it can go red.
 SHAs and file:line carry the detail; do not narrate what the reader can open.
 
-Cut it and call again.
+Revise it and call again now — asking the operator to do the rewrite is the failure this reason
+exists to prevent.
 ```
 
 Inside budget but flagged by cope or basanite:
@@ -60,8 +67,106 @@ cope flagged this:
 
 clause_symmetry: 1 violation(s)
 
-Cut it and call again.
+Revise it and call again now — asking the operator to do the rewrite is the failure this reason
+exists to prevent.
 ```
+
+## When a deny repeats
+
+A deny that comes back unchanged three times in a row is a loop, not a gate — the model rewrote
+blind because nothing told it whether the rewrite helped. A flagged-but-in-budget write tracks that
+in `internal/attemptstate`, one small state file per session, tool, and prose kind, since a fresh
+hook process has no memory of its own between calls:
+
+- **Attempt 1** denies as above.
+- **Attempt 2** denies again, and names what changed since attempt 1 — cleared, still flagged, or
+  newly flagged, by cope or basanite's own rule or word id.
+- **Attempt 3**, if that set hasn't shrunk since attempt 2, lets the write through instead of
+  denying a fourth time, with `additionalContext` naming what's still flagged rather than going
+  quiet about it. A set that did shrink denies again, and the same check runs at attempt 4.
+
+Being over budget is exempt from all of this: it always denies, at any attempt count, since it's
+meant to be a hard limit, not a register a rewrite can talk its way past.
+
+gh-write's own backstop (below) never gets this: it only ever sees the body on its stdin, never a
+session id, so it has nothing to key a retry sequence on — every gh-write refusal stays attempt 1.
+
+`TICKETVOICE_STATE_DIR` overrides where the attempt state lives; see
+[Configuration](#configuration).
+
+## Impact line
+
+An issue description (not a comment — a comment isn't the ticket) must say what a customer or
+exec would notice, in plain language, or say plainly that nobody would:
+
+```
+Impact: users on the map page see load times drop from ~4s to under 1s.
+```
+
+```
+Impact: none — internal maintenance, no user-facing change.
+```
+
+Missing entirely denies:
+
+```
+This issue description has no impact line. Add one, in plain language a PM or exec would understand:
+
+Impact: users on the map page see load times drop from ~4s to under 1s.
+
+or, for work nobody outside engineering would notice:
+
+Impact: none — internal maintenance, no user-facing change.
+
+Revise it and call again now — asking the operator to do the rewrite is the failure this reason
+exists to prevent.
+```
+
+This never checks whether the stated impact is *true* — that's a narrative judgment call, out of
+scope for a fast synchronous hook (see [Ground-truth citations](#ground-truth-citations) for the
+line drawn the other way, on citations). It also deliberately doesn't ask a ticket to restate
+which project or initiative it belongs to — that's already a native, structured Linear field
+(`project`/`projectMilestone`), visible in Linear's own UI and readable directly by anything that
+wants it, including whatever turns Linear search results into release notes. Impact has no such
+field, which is the only reason it's worth requiring here at all.
+
+`TICKETVOICE_NO_IMPACT_CHECK` turns this off.
+
+## Ground-truth citations
+
+A ticket citing another ticket id, a `file:line`, or a commit SHA is verified, not trusted at face
+value. Each check fails open on anything it can't determine and flags only a citation it can
+positively confirm is wrong:
+
+- **Ticket ids** (`ABC-550`-shaped) are checked against Linear directly. Ordinary jargon that
+  matches the same shape — `UTF-8`, `SHA-256`, `GPT-4`, `RFC-2119`, `COVID-19` — never reaches
+  Linear at all: a citation only counts as a candidate if its letter prefix matches one of the
+  workspace's real team keys, fetched and cached once a day. Up to `TICKETVOICE_LINEAR_CITE_CAP`
+  (default 5) distinct ids are checked per call.
+- **`` `path/to/file.go:123` `` or `` `path/to/file.go:100-200` ``** must exist, at that line
+  count, relative to the call's `cwd`. A path with no extension (`Makefile`, `Dockerfile`) isn't
+  matched — a known v1 gap, not a silent misread.
+- **`` `<sha>` ``** (7-40 hex characters) must be a real commit in the repo at `cwd`. Requires
+  `git` and a real repository; skipped entirely otherwise.
+
+```
+ticket reference(s) don't exist: ABC-99999999
+nope.go doesn't exist
+`deadbeefcafe` isn't a commit in this repo
+```
+
+This stops at existence, not truth. Verifying a *narrative* claim — "already fixed in ABC-777,"
+"the file already exists" — needs real code-reading judgment, which means an LLM call, not a fast
+deterministic check; that's out of scope for a synchronous `PreToolUse` hook. Checking that a
+cited id, path, or SHA is real needs no judgment at all, which is what keeps it in scope.
+
+Unlike the impact line and the escalation in [When a deny repeats](#when-a-deny-repeats), a
+citation check is exempt from the 3-attempt escalation: a nonexistent SHA doesn't become real by
+attempt 3, so this always denies regardless of attempt count, the same as being over budget.
+
+Requires `TICKETVOICE_LINEAR_TOKEN` for the ticket-id check only — unset, that one check skips
+(file:line and SHA checks don't need Linear at all). `TICKETVOICE_NO_CITATION_CHECK` turns off all
+three.
 
 ## Install
 
@@ -155,7 +260,23 @@ has no effect on cope or basanite's own verdicts. Set it in the hook's environme
 Missing or unreachable is not an error for either — the call just isn't scored against that sibling's
 rules that time.
 
+`TICKETVOICE_STATE_DIR` overrides where the retry-attempt state from
+[When a deny repeats](#when-a-deny-repeats) lives. Unset, it follows the same
+`$XDG_STATE_HOME`/`~/.local/state/ticketvoice` convention cope and basanite already use for their
+own state.
+
 `TICKETVOICE_NO_AGENT_TAG` turns off the agent tag below. Unset (the default) means tagged.
+
+`TICKETVOICE_LINEAR_TOKEN` is a Linear personal API key (`lin_api_...`), sent raw with no `Bearer`
+prefix — the same kind of token an operator already has for Linear's own MCP server, just read
+from its own env var so the two never collide. Unset, the ticket-id half of [Ground-truth
+citations](#ground-truth-citations) skips. `TICKETVOICE_LINEAR_ENDPOINT` overrides the GraphQL
+endpoint (mainly for tests). `TICKETVOICE_LINEAR_CITE_CAP` (default `5`) caps how many distinct
+ticket ids get checked per call.
+
+`TICKETVOICE_NO_IMPACT_CHECK` and `TICKETVOICE_NO_CITATION_CHECK` disable
+[Impact line](#impact-line) and [Ground-truth citations](#ground-truth-citations) independently of
+each other and of the Linear token.
 
 ## What it counts
 
@@ -199,6 +320,15 @@ callers instead: ticketvoice's hook forwards its own stdin the moment it can fin
 `< file` body ahead of the `gh` call, and gh-write forwards the real body bytes itself right
 before sending, regardless of how they arrived — see the gh-write section above. Same two
 binaries, same verdict shape, just two different callers covering what the other can't see.
+
+[Impact line](#impact-line) and [Ground-truth citations](#ground-truth-citations) are a different
+shape from cope and basanite: first-party, not delegated to a sibling binary, and neither reads on
+register or vocabulary — one checks a plain-language line is present, the other checks a citation
+against ground truth. The impact check never touches the network at all — see [Impact
+line](#impact-line) for why it never asks a ticket to restate data (the project/initiative link)
+Linear already tracks natively. The citation check's ticket-id half does read from Linear, but only
+to confirm an id resolves to something, the same read-only existence check it runs against a local
+file or a local git commit.
 
 ## Development
 

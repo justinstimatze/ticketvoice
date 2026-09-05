@@ -14,10 +14,17 @@
 // structure) — and both, independently, chose never to block on their own: additionalContext only.
 // This hook closes that by calling both directly, forwarding the exact bytes it received to
 // cope-gate -pretool and basanite writecheck -no-dedup and gating on their verdicts too, not just
-// the budget — see judgeCope and judgeBasanite. See CHANGELOG.md.
+// the budget — see judgeCope and judgeBasanite.
+//
+// A denial that never changes is a loop, not a gate: internal/attemptstate tracks how many times
+// in a row the same session has had the same write denied on a flagged-but-in-budget body, and if
+// three attempts in a row show no shrink in what's flagged, the third one lets the write through
+// with a note rather than denying it again. Being over budget is exempt from this — it's the one
+// check meant to be a hard limit, not talked past by attempt count. See CHANGELOG.md.
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -27,8 +34,13 @@ import (
 	"regexp"
 	"runtime/debug"
 	"strings"
+	"sync"
 
+	"github.com/justinstimatze/ticketvoice/internal/attemptstate"
 	"github.com/justinstimatze/ticketvoice/internal/budgetgate"
+	"github.com/justinstimatze/ticketvoice/internal/citecheck"
+	"github.com/justinstimatze/ticketvoice/internal/impactline"
+	"github.com/justinstimatze/ticketvoice/internal/linearclient"
 )
 
 var version = "dev"
@@ -69,6 +81,7 @@ func buildVersion() string {
 }
 
 type hookInput struct {
+	SessionID string          `json:"session_id"`
 	ToolName  string          `json:"tool_name"`
 	ToolInput json.RawMessage `json:"tool_input"`
 	Cwd       string          `json:"cwd"`
@@ -93,6 +106,7 @@ type hookOutput struct {
 		PermissionDecision       string          `json:"permissionDecision"`
 		PermissionDecisionReason string          `json:"permissionDecisionReason,omitempty"`
 		UpdatedInput             json.RawMessage `json:"updatedInput,omitempty"`
+		AdditionalContext        string          `json:"additionalContext,omitempty"`
 	} `json:"hookSpecificOutput"`
 }
 
@@ -269,6 +283,39 @@ func evaluate(text, kind string, budget int) (bool, string) {
 func judgeCope(rawStdin []byte) budgetgate.Judgment     { return budgetgate.JudgeCope(rawStdin) }
 func judgeBasanite(rawStdin []byte) budgetgate.Judgment { return budgetgate.JudgeBasanite(rawStdin) }
 
+// linearIdentity pulls whatever pre-existing id a Linear tool_input already carries — "id" for an
+// issue edit (save_issue), "issueId" for a comment attached to one — so attemptstate.Key can tell
+// "the same ticket, retried" from "a different ticket that happens to trip the same rules." A
+// fresh save_issue create has neither field and returns "" — see ghWriteIdentity for the same
+// boundary case on the Bash surface, and attemptstate.Key's doc comment for what an empty anchor
+// means.
+func linearIdentity(raw json.RawMessage) string {
+	var in struct {
+		ID      string `json:"id"`
+		IssueID string `json:"issueId"`
+	}
+	if json.Unmarshal(raw, &in) != nil {
+		return ""
+	}
+	if in.ID != "" {
+		return in.ID
+	}
+	return in.IssueID
+}
+
+// ghWriteTargetID matches the numeric id gh-write's own CLI grammar puts after comment/edit — the
+// issue or PR the call is already about, not one it's about to create.
+var ghWriteTargetID = regexp.MustCompile(`\b(?:issue|pr)\s+(?:comment|edit)\s+(\d+)\b`)
+
+// ghWriteIdentity mirrors linearIdentity for a Bash gh-write call. A create call has no target
+// yet, so it returns "" the same way a fresh Linear issue does.
+func ghWriteIdentity(command string) string {
+	if m := ghWriteTargetID.FindStringSubmatch(command); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
 // linearTagField names the tool_input field taggedLinearInput should rewrite for a given Linear
 // tool call and prose kind, or "" when there's none: a Bash call (GitHub's tag is gh-write's own
 // job, and "description"/"body" mean nothing on a command string) or a patch (a diff against an
@@ -324,10 +371,88 @@ func taggedLinearInput(tool string, raw json.RawMessage, kind string) json.RawMe
 	return out
 }
 
+// retryNowLine replaces the old "Cut it and call again," which told the model what to do but not
+// what to refrain from. The observed failure was Claude choosing to ask the operator to rewrite
+// the ticket by hand instead of retrying itself, so the line has to name that choice, not just the
+// fix.
+const retryNowLine = "Revise it and call again now — asking the operator to do the rewrite is the failure this reason exists to prevent."
+
+// deltaNote reports what changed in the violation set since the last denial of this same
+// sequence, or "" on the first attempt (prev empty). Naming what's gone, what's still there, and
+// what's new is what lets a rewrite be judged instead of repeated blind.
+func deltaNote(prev, cur []string) string {
+	if len(prev) == 0 {
+		return ""
+	}
+	curSet := make(map[string]bool, len(cur))
+	for _, id := range cur {
+		curSet[id] = true
+	}
+	prevSet := make(map[string]bool, len(prev))
+	var gone, stayed []string
+	for _, id := range prev {
+		prevSet[id] = true
+		if curSet[id] {
+			stayed = append(stayed, id)
+		} else {
+			gone = append(gone, id)
+		}
+	}
+	var added []string
+	for _, id := range cur {
+		if !prevSet[id] {
+			added = append(added, id)
+		}
+	}
+
+	var parts []string
+	if len(gone) > 0 {
+		parts = append(parts, "cleared: "+strings.Join(gone, ", "))
+	}
+	if len(stayed) > 0 {
+		parts = append(parts, "still flagged: "+strings.Join(stayed, ", "))
+	}
+	if len(added) > 0 {
+		parts = append(parts, "newly flagged: "+strings.Join(added, ", "))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "Since the last attempt — " + strings.Join(parts, "; ") + "."
+}
+
+// stalledNote is the additionalContext a stalled sequence gets instead of a fourth denial — see
+// runHookWithInput's escalation branch. It still names what's flagged, so letting the write
+// through isn't the same as staying silent about it. citations never reaches here — it's exempt
+// from escalation (see the escalation guard) — so it isn't a parameter.
+func stalledNote(kind string, attempt int, cope, basanite, impact budgetgate.Judgment) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "This %s went through on attempt %d with the same hit(s) still flagged. A deny that "+
+		"never shrinks is a loop, not a gate.", kind, attempt)
+	if cope.Flagged {
+		fmt.Fprintf(&b, "\n\ncope still flags this:\n\n%s", cope.Note)
+	}
+	if basanite.Flagged {
+		fmt.Fprintf(&b, "\n\nbasanite still flags this:\n\n%s", basanite.Note)
+	}
+	if impact.Flagged {
+		fmt.Fprintf(&b, "\n\n%s", impact.Note)
+	}
+	return b.String()
+}
+
 // runHookWithInput is the hook's decision logic, taking the raw bytes so the same bytes can be
 // forwarded to the siblings unmodified and so this runs without a subprocess in tests. Returns nil
 // when the call should proceed with no hook involvement at all — untagged, since there was nothing
 // to tag (a Bash call, a patch, or the tag disabled) as well as unflagged.
+//
+// Being over budget always denies, attempt count or not — it's the one check meant to be a hard
+// limit, not a register a rewrite can talk its way past (see CHANGELOG.md). cope and basanite are
+// the opposite case: a flagged-but-in-budget write tracks its own retry sequence in
+// internal/attemptstate, keyed on session, tool, and kind, and on the third attempt in a row whose
+// violation set hasn't shrunk since the one before it, this lets the write through with a note
+// instead of denying a fourth time — a deny that never shrinks is a loop, not a gate. See
+// stalledNote/deltaNote above for what the model actually sees at each step.
 func runHookWithInput(raw []byte) *hookOutput {
 	var in hookInput
 	// A hook that cannot parse its input must not block the call it was watching.
@@ -341,17 +466,83 @@ func runHookWithInput(raw []byte) *hookOutput {
 	budget := budgetFor(rawBudget)
 	over, budgetReason := evaluate(text, kind, budget)
 
-	cope := judgeCope(raw)
-	basanite := judgeBasanite(raw)
+	linear, _ := linearclient.New() // nil, ok=false when TICKETVOICE_LINEAR_TOKEN is unset — every
+	// caller below already treats a nil client as "skip this check," the same fail-open posture a
+	// missing cope-gate/basanite binary gets.
+
+	// cope, basanite, and citecheck each make their own external call (a subprocess, a subprocess,
+	// and up to a few HTTP/git calls respectively) and used to run one after another — this is the
+	// hook's first concurrency, so none of that time simply adds up. Each already bounds itself
+	// internally (judgeSibling's 3s context, linearclient's 4s context, citecheck's own git
+	// timeouts), so wg.Wait() here is already bounded by the slowest of those, not unbounded — an
+	// additional outer timeout would either never fire or, if it somehow did, read cope/basanite/
+	// citations/citeIDs while a goroutine was still writing them, which is a real data race for no
+	// real benefit given every leaf already has its own ceiling.
+	var cope, basanite, citations budgetgate.Judgment
+	var citeIDs []string
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() { defer wg.Done(); cope = judgeCope(raw) }()
+	go func() { defer wg.Done(); basanite = judgeBasanite(raw) }()
+	go func() {
+		defer wg.Done()
+		citations, citeIDs = citecheck.Judge(context.Background(), linear, in.Cwd, text)
+	}()
+	wg.Wait()
+
+	// impactline only applies to the ticket's own description, not a comment on it, and needs no
+	// network call — it runs synchronously, outside the goroutine group above.
+	var impact budgetgate.Judgment
+	if kind == "issue description" {
+		impact = impactline.Judge(text)
+	}
+
 	updatedInput := taggedLinearInput(in.ToolName, in.ToolInput, kind)
 
-	if !over && !cope.Flagged && !basanite.Flagged {
+	var identity string
+	if in.ToolName == "Bash" {
+		var b bashInput
+		if json.Unmarshal(in.ToolInput, &b) == nil {
+			identity = ghWriteIdentity(b.Command)
+		}
+	} else {
+		identity = linearIdentity(in.ToolInput)
+	}
+	key := attemptstate.Key{SessionID: in.SessionID, Tool: in.ToolName, Kind: kind, Anchor: identity}
+
+	if !over && !cope.Flagged && !basanite.Flagged && !impact.Flagged && !citations.Flagged {
+		attemptstate.Clear(key)
 		if updatedInput == nil {
 			return nil
 		}
 		var out hookOutput
 		out.HookSpecificOutput.HookEventName = "PreToolUse"
 		out.HookSpecificOutput.PermissionDecision = "allow"
+		out.HookSpecificOutput.UpdatedInput = updatedInput
+		return &out
+	}
+
+	var impactIDs []string
+	if impact.Flagged {
+		impactIDs = []string{impactline.ViolationID}
+	}
+	curIDs := budgetgate.AllViolationIDs(
+		budgetgate.ViolationIDs("cope", cope.Note),
+		budgetgate.ViolationIDs("basanite", basanite.Note),
+		impactIDs,
+		citeIDs,
+	)
+	rec := attemptstate.Load(key)
+	attempt := rec.Attempts + 1
+
+	// citations is exempt from escalation: a nonexistent ticket, file, or SHA doesn't become real
+	// by attempt 3, so it always denies regardless of attempt count, the same as being over budget.
+	if !over && !citations.Flagged && attempt >= 3 && len(curIDs) >= len(rec.Prior) {
+		attemptstate.Clear(key)
+		var out hookOutput
+		out.HookSpecificOutput.HookEventName = "PreToolUse"
+		out.HookSpecificOutput.PermissionDecision = "allow"
+		out.HookSpecificOutput.AdditionalContext = stalledNote(kind, attempt, cope, basanite, impact)
 		out.HookSpecificOutput.UpdatedInput = updatedInput
 		return &out
 	}
@@ -368,7 +559,18 @@ func runHookWithInput(raw []byte) *hookOutput {
 	if basanite.Flagged {
 		reason += fmt.Sprintf("\n\nbasanite flagged this:\n\n%s", basanite.Note)
 	}
-	reason += "\n\nCut it and call again."
+	if impact.Flagged {
+		reason += "\n\n" + impact.Note
+	}
+	if citations.Flagged {
+		reason += "\n\n" + citations.Note
+	}
+	if delta := deltaNote(rec.Prior, curIDs); delta != "" {
+		reason += "\n\n" + delta
+	}
+	reason += "\n\n" + retryNowLine
+
+	attemptstate.Save(key, attemptstate.Record{Attempts: attempt, Prior: curIDs})
 
 	var out hookOutput
 	out.HookSpecificOutput.HookEventName = "PreToolUse"

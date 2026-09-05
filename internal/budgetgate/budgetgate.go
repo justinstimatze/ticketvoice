@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -172,6 +173,55 @@ func JudgeCope(rawStdin []byte) Judgment {
 // seen-set file that a second, independent caller would otherwise race.
 func JudgeBasanite(rawStdin []byte) Judgment {
 	return judgeSibling(binPath("TICKETVOICE_BASANITE", "basanite"), []string{"writecheck", "-no-dedup"}, rawStdin)
+}
+
+// ruleIDPattern pulls the identifier a sibling's tally names right before its own "×N" — cope's
+// "id×count" (pretool.go's writePreToolReport, no space) and basanite's "word ×count" (one space)
+// both fit it, so a caller can tell one attempt's hits from the next without either sibling
+// speaking a structured format just for that.
+var ruleIDPattern = regexp.MustCompile(`(\S+)\s?×\d+`)
+
+// ViolationIDs extracts the set of rule or word ids a sibling's flagged note names, prefixed so
+// cope's and basanite's ids can share one set without colliding. Returns nil for a clean note, or
+// for a note whose sibling doesn't tally hits in this shape.
+func ViolationIDs(prefix, note string) []string {
+	if note == "" {
+		return nil
+	}
+	seen := map[string]bool{}
+	for _, m := range ruleIDPattern.FindAllStringSubmatch(note, -1) {
+		seen[prefix+":"+m[1]] = true
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// CombinedViolationIDs merges cope's and basanite's ids into the one set a retry sequence
+// compares attempt to attempt — see internal/attemptstate.
+func CombinedViolationIDs(cope, basanite Judgment) []string {
+	ids := append(ViolationIDs("cope", cope.Note), ViolationIDs("basanite", basanite.Note)...)
+	sort.Strings(ids)
+	return ids
+}
+
+// AllViolationIDs merges every check's contribution to one attempt's violation-id set — cope
+// and basanite's tally-derived ids alongside any other checker's own pre-computed ids
+// (internal/impactline, internal/citecheck), sorted so attempt-to-attempt comparison is stable
+// regardless of which order the callers pass their groups in.
+func AllViolationIDs(groups ...[]string) []string {
+	var ids []string
+	for _, g := range groups {
+		ids = append(ids, g...)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // LinearPayload builds a synthetic PreToolUse-shaped payload carrying text under the same

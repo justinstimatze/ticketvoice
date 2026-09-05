@@ -1,5 +1,84 @@
 # Changelog
 
+## Impact line, and ground-truth citation checks — 2026-09-05
+
+Two new checks, from an adversarial panel review of 60 real Linear tickets against this gate:
+neither a PM/exec reader nor whatever turns Linear search results into public release notes had a
+reliable signal for "is this user-facing, and why," and nothing verified that a cited ticket id,
+file:line, or SHA was real rather than stale or hallucinated.
+
+The impact check went through a real design change before it shipped. The first draft asked a
+ticket to declare its project in a fenced `yaml` block, matched against Linear's real
+`project`/`projectMilestone` fields. That mechanism only existed to make the restatement
+checkable — and stopped mattering once it was clear which project a ticket belongs to is already
+tracked natively by Linear, readable directly by anything that wants it (a release-note agent
+included), so the second draft dropped the whole restatement-and-match idea. What shipped is
+narrower: an issue description (not a comment) needs one plain-language `Impact:` line, checked
+for presence only, no fencing and no Linear lookup at all.
+
+Ground-truth citations (`internal/citecheck`) verify a ticket id against Linear, a `file:line`
+against the local filesystem, and a commit SHA against the local git repo — existence only, never
+whether a *narrative* claim built on that citation is true, which needs real code-reading
+judgment and is out of scope for a synchronous hook the same way it was ruled out of scope for the
+impact line's own truth. Two things were verified live, not assumed, before either check's deny
+path was written:
+
+- Linear's actual not-found response: a bogus issue id comes back `data: null` with an `errors`
+  entry whose `extensions.code` is `INPUT_ERROR` — a clean, distinguishable signal, not something
+  that could be confused with an auth or rate-limit error, which get a different code and must
+  never be read as "confirmed nonexistent."
+- `git cat-file -e <sha>^{commit}` exits 128 both when `cwd` isn't a git repo at all, and when
+  `cwd` is a repo but the cited SHA genuinely doesn't exist in it — indistinguishable from the
+  exit code alone. Fixed by checking `git rev-parse --is-inside-work-tree` once per call first;
+  only once that confirms a real repo does a `cat-file` failure mean "confirmed nonexistent."
+
+A ticket-id citation also had to be told apart from ordinary jargon matching the same
+`[A-Z]{2,10}-\d+` shape — `UTF-8`, `SHA-256`, `GPT-4`, `RFC-2119`, `COVID-19` all match it, and
+Linear will honestly report `null` for every one of them, which would have denied a legitimate
+write over incidental hyphen-and-digit text. Fixed by gating extraction on the workspace's real,
+cached team keys (confirmed live against a real Linear workspace during development — a small,
+stable set) — a candidate only counts if its prefix matches one of those.
+
+Both checks fold into the existing `Judgment`/escalation machinery from the entry below: citations
+are ground-truth facts, so — like the word budget — they're exempt from the 3-attempt escalation
+and always deny; the impact line, being fixable by adding a sentence, stays inside the normal
+escalation pool. This is also the hook's first real concurrency: `cope`, `basanite`, and the
+citation checks' network/subprocess calls used to run one after another and now run together,
+since none of that time needs to add up once each already bounds itself independently.
+
+## Escalate a stalled deny instead of denying it forever — 2026-09-04
+
+"Deny, and Claude rewrites and retries on its own" (below) held for the first retry and then didn't:
+in practice Claude would sometimes give up after one denial and ask the operator to rewrite the
+ticket by hand instead — the exact human-in-the-loop outcome the ask→deny change was meant to
+close. Two changes, both scoped to the hook, not gh-write's own backstop (it never sees a session
+id, only the body on its stdin, so it has nothing to key a retry sequence on):
+
+- The reason's closing line named the fix but not the failure — "Cut it and call again" doesn't
+  say what to refrain from. It now reads "Revise it and call again now — asking the operator to do
+  the rewrite is the failure this reason exists to prevent," naming the choice that was actually
+  going wrong.
+- A flagged-but-in-budget write now tracks its own retry sequence — session, tool, and prose kind —
+  in the new `internal/attemptstate` package, one small JSON file per sequence since a fresh hook
+  process has no memory between calls. Attempt 2 names what changed since attempt 1 (cleared, still
+  flagged, newly flagged, by cope/basanite rule or word id — see `budgetgate.ViolationIDs`, which
+  parses those ids out of each sibling's own tally line). Attempt 3, if that set hasn't shrunk since
+  attempt 2, lets the write through with an `additionalContext` note instead of denying a fourth
+  time; a set that did shrink keeps denying, and the same check runs again at attempt 4. Being over
+  budget is exempt — it's a hard limit, not a register a rewrite can talk its way past, so it always
+  denies regardless of attempt count. See [When a deny repeats](README.md#when-a-deny-repeats).
+
+The retry sequence's key was originally just session, tool, and kind — two unrelated tickets
+posted back-to-back with the same tool in one session would have shared a counter, so a fresh
+ticket's very first attempt could misread as a stalled one and get waved through early. plancheck's
+`gate.go` had already hit the mirror-image version of this (resetting too eagerly on any plan-hash
+change, looping an agent 6-8 times on an already-converged plan) and fixed it with a `PlanHash`
+that anchors the reset to what actually changed. `attemptstate.Key` now carries the same kind of
+anchor — a Linear `id`/`issueId`, or a gh-write target number parsed off the Bash command — so two
+different tickets never share one sequence. A fresh create has no id yet on either surface, so it
+stays in the shared, unprotected bucket the fix can't reach — the same boundary plancheck has for a
+plan with nothing yet to hash.
+
 ## Deny instead of ask on a flagged or over-budget write — 2026-08-29
 
 `permissionDecisionReason` for `"ask"` is shown to the user, not Claude — confirmed against the

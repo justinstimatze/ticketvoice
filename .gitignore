@@ -1,2 +1,4 @@
 bin/
 /ticketvoice
+/analysis/
+/.plancheck-debug.json

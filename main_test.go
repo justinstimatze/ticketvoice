@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,13 @@ import (
 )
 
 func words(n int) string { return strings.TrimSpace(strings.Repeat("word ", n)) }
+
+// cleanIssueBody is words(n) plus an impact line — the impactline check only applies to an issue
+// description, so any fixture meant to read as fully clean needs this, not just an under-budget,
+// unflagged word count.
+func cleanIssueBody(n int) string {
+	return words(n) + "\\n\\nImpact: none - test fixture."
+}
 
 func TestProseWordsExcludesFencedCode(t *testing.T) {
 	body := words(10) + "\n\n```ts\n" + words(500) + "\n```\n\n" + words(5)
@@ -31,7 +39,7 @@ func TestProseSelectsFieldAndBudgetPerTool(t *testing.T) {
 	}{
 		{"issue description", "mcp__linear__save_issue", `{"description":"hello there"}`, "hello there", defaultIssueBudget},
 		{"comment body", "mcp__linear__save_comment", `{"body":"hello there"}`, "hello there", defaultCommentBudget},
-		{"patch counts inserted text only", "mcp__linear__save_issue", `{"id":"CUR-1","patch":[{"op":"append","text":"added"}]}`, "added", defaultIssueBudget},
+		{"patch counts inserted text only", "mcp__linear__save_issue", `{"id":"ABC-1","patch":[{"op":"append","text":"added"}]}`, "added", defaultIssueBudget},
 		{"unrelated tool", "mcp__linear__list_issues", `{"description":"hello"}`, "", 0},
 		{"issue with no prose", "mcp__linear__save_issue", `{"state":"Done"}`, "", 0},
 		{"diff comment body", "mcp__linear__save_diff_comment", `{"body":"hello there"}`, "hello there", defaultCommentBudget},
@@ -244,6 +252,26 @@ func clean(t *testing.T) {
 	t.Setenv("TICKETVOICE_BASANITE", fakeSiblingBinary(t, "basanite", ""))
 }
 
+// freshState points the retry-attempt state (internal/attemptstate) at a private temp dir, so a
+// test exercising it never touches the operator's real ~/.local/state/ticketvoice.
+func freshState(t *testing.T) {
+	t.Helper()
+	t.Setenv("TICKETVOICE_STATE_DIR", t.TempDir())
+}
+
+// copeFixture renders a cope-gate note in its real tally-line shape (pretool.go's
+// writePreToolReport: "field: N violation(s) — id×count ..."), which is what
+// budgetgate.ViolationIDs actually parses. The existing fixtures elsewhere in this file
+// ("dangling_end: 1 violation(s)") are illustrative only and never exercise multi-attempt state.
+func copeFixture(ids ...string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "description: %d violation(s) —", len(ids))
+	for _, id := range ids {
+		fmt.Fprintf(&b, " %s×1", id)
+	}
+	return b.String()
+}
+
 func TestJudgeCopeMissingBinaryFailsOpen(t *testing.T) {
 	t.Setenv("TICKETVOICE_COPE_GATE", filepath.Join(t.TempDir(), "does-not-exist"))
 	if j := judgeCope([]byte(`{}`)); j.Flagged {
@@ -309,6 +337,7 @@ func TestRunHookDeniesWhenCopeFlagsAnUnderBudgetTicket(t *testing.T) {
 
 func TestRunHookDeniesWhenBasaniteFlagsAnUnderBudgetTicket(t *testing.T) {
 	clean(t)
+	freshState(t)
 	t.Setenv("TICKETVOICE_BASANITE", fakeSiblingBinary(t, "basanite", "load-bearing ×1 → supporting"))
 	raw := []byte(`{"session_id":"s","tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + words(20) + `"}}`)
 	out := runHookWithInput(raw)
@@ -337,7 +366,7 @@ func TestRunHookSilentOnUnrelatedTool(t *testing.T) {
 // so a reader always sees the ticket is agent-authored, not only when something got flagged.
 func TestRunHookTagsCleanLinearWrite(t *testing.T) {
 	clean(t)
-	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"id":"CUR-1","teamId":"eng","description":"` + words(20) + `"}}`)
+	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"id":"ABC-1","teamId":"eng","description":"` + cleanIssueBody(20) + `"}}`)
 	out := runHookWithInput(raw)
 	if out == nil {
 		t.Fatal("a clean write must still come back tagged, not nil")
@@ -352,7 +381,7 @@ func TestRunHookTagsCleanLinearWrite(t *testing.T) {
 	if !strings.HasPrefix(updated["description"].(string), "🤖 ") {
 		t.Fatalf("description must carry the agent tag, got %+v", updated)
 	}
-	if updated["id"] != "CUR-1" || updated["teamId"] != "eng" {
+	if updated["id"] != "ABC-1" || updated["teamId"] != "eng" {
 		t.Fatalf("unrelated fields must survive the rewrite untouched, got %+v", updated)
 	}
 }
@@ -362,7 +391,7 @@ func TestRunHookTagsCleanLinearWrite(t *testing.T) {
 // Linear write rather than just skip the tag.
 func TestRunHookTagPreservesUnknownFields(t *testing.T) {
 	clean(t)
-	raw := []byte(`{"tool_name":"mcp__linear__save_comment","tool_input":{"issueId":"CUR-9","priority":2,"body":"` + words(20) + `"}}`)
+	raw := []byte(`{"tool_name":"mcp__linear__save_comment","tool_input":{"issueId":"ABC-9","priority":2,"body":"` + words(20) + `"}}`)
 	out := runHookWithInput(raw)
 	if out == nil {
 		t.Fatal("want a tagged allow, got nil")
@@ -371,7 +400,7 @@ func TestRunHookTagPreservesUnknownFields(t *testing.T) {
 	if err := json.Unmarshal(out.HookSpecificOutput.UpdatedInput, &updated); err != nil {
 		t.Fatalf("updatedInput must be valid JSON: %v", err)
 	}
-	if updated["issueId"] != "CUR-9" || updated["priority"] != float64(2) {
+	if updated["issueId"] != "ABC-9" || updated["priority"] != float64(2) {
 		t.Fatalf("fields this hook never reads must still round-trip, got %+v", updated)
 	}
 }
@@ -381,7 +410,7 @@ func TestRunHookTagPreservesUnknownFields(t *testing.T) {
 func TestRunHookNoTagWhenDisabled(t *testing.T) {
 	clean(t)
 	t.Setenv("TICKETVOICE_NO_AGENT_TAG", "1")
-	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + words(20) + `"}}`)
+	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + cleanIssueBody(20) + `"}}`)
 	if out := runHookWithInput(raw); out != nil {
 		t.Fatalf("a clean write with the tag disabled must stay silent, got %+v", out)
 	}
@@ -421,7 +450,7 @@ func TestRunHookNeverTagsBashCalls(t *testing.T) {
 // prefix belongs on, so this stays untagged even though it's still gated on word count.
 func TestRunHookNeverTagsAPatch(t *testing.T) {
 	clean(t)
-	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"id":"CUR-1","patch":[{"op":"append","text":"` + words(20) + `"}]}}`)
+	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"id":"ABC-1","patch":[{"op":"append","text":"` + words(20) + `"}]}}`)
 	out := runHookWithInput(raw)
 	if out != nil && out.HookSpecificOutput.UpdatedInput != nil {
 		t.Fatalf("a patch call must never get updatedInput, got %s", out.HookSpecificOutput.UpdatedInput)
@@ -441,6 +470,136 @@ func TestRunHookReasonCarriesAllThreeFindingsWhenOverBudgetAndBothFlag(t *testin
 	reason := out.HookSpecificOutput.PermissionDecisionReason
 	if !strings.Contains(reason, "200 words") || !strings.Contains(reason, "forked_end") || !strings.Contains(reason, "load-bearing") {
 		t.Fatalf("reason must carry the word count and both siblings' findings: %q", reason)
+	}
+}
+
+// A denied write that never changes reads as a loop, not a gate. Attempt 1 denies plainly;
+// attempt 2 denies and says nothing changed; attempt 3, still unshrunk, lets the write through
+// instead of denying a fourth time.
+func TestRunHookEscalatesAfterThreeStalledAttempts(t *testing.T) {
+	clean(t)
+	freshState(t)
+	t.Setenv("TICKETVOICE_COPE_GATE", fakeSiblingBinary(t, "cope-gate", copeFixture("dangling_end", "clause_symmetry")))
+	raw := []byte(`{"session_id":"esc-stall","tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + words(20) + `"}}`)
+
+	out := runHookWithInput(raw)
+	if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("attempt 1: want deny, got %+v", out)
+	}
+	if strings.Contains(out.HookSpecificOutput.PermissionDecisionReason, "Since the last attempt") {
+		t.Fatalf("attempt 1 has no prior attempt to diff against: %q", out.HookSpecificOutput.PermissionDecisionReason)
+	}
+
+	out = runHookWithInput(raw)
+	if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("attempt 2: want deny, got %+v", out)
+	}
+	if !strings.Contains(out.HookSpecificOutput.PermissionDecisionReason, "still flagged: cope:clause_symmetry, cope:dangling_end") {
+		t.Fatalf("attempt 2 must say the set didn't move: %q", out.HookSpecificOutput.PermissionDecisionReason)
+	}
+
+	out = runHookWithInput(raw)
+	if out == nil || out.HookSpecificOutput.PermissionDecision != "allow" {
+		t.Fatalf("attempt 3, unshrunk: want allow, got %+v", out)
+	}
+	if !strings.Contains(out.HookSpecificOutput.AdditionalContext, "dangling_end") {
+		t.Fatalf("the stalled note must still name what's flagged: %q", out.HookSpecificOutput.AdditionalContext)
+	}
+}
+
+// Real progress must not be cut off at attempt 3 just because a counter hit a number — only a
+// violation set that stops shrinking earns the allow-through.
+func TestRunHookKeepsDenyingWhileTheViolationSetShrinks(t *testing.T) {
+	clean(t)
+	freshState(t)
+	call := func(ids ...string) *hookOutput {
+		t.Setenv("TICKETVOICE_COPE_GATE", fakeSiblingBinary(t, "cope-gate", copeFixture(ids...)))
+		raw := []byte(`{"session_id":"esc-shrink","tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + words(20) + `"}}`)
+		return runHookWithInput(raw)
+	}
+
+	if out := call("dangling_end", "clause_symmetry"); out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("attempt 1: want deny, got %+v", out)
+	}
+	if out := call("dangling_end", "clause_symmetry"); out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("attempt 2: want deny, got %+v", out)
+	}
+	// Attempt 3 drops one violation — genuine progress, so this must still deny, not allow.
+	if out := call("dangling_end"); out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("attempt 3, shrunk: want deny (progress, not a stall), got %+v", out)
+	}
+	// Attempt 4 repeats that smaller set, stalled relative to attempt 3 — now it allows.
+	if out := call("dangling_end"); out == nil || out.HookSpecificOutput.PermissionDecision != "allow" {
+		t.Fatalf("attempt 4, unshrunk since attempt 3: want allow, got %+v", out)
+	}
+}
+
+// Being over budget is a hard limit, not a register — no attempt count earns it an allow-through.
+func TestRunHookNeverEscalatesPastBudget(t *testing.T) {
+	clean(t)
+	freshState(t)
+	raw := []byte(`{"session_id":"esc-budget","tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + words(200) + `"}}`)
+	for i := 1; i <= 4; i++ {
+		out := runHookWithInput(raw)
+		if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+			t.Fatalf("attempt %d, over budget: want deny, got %+v", i, out)
+		}
+	}
+}
+
+// A clean rewrite closes the sequence, so the next flagged write on the same session and tool
+// starts a fresh attempt 1 — it must not inherit a stranger's stalled count.
+func TestRunHookResetsAttemptsAfterACleanWrite(t *testing.T) {
+	clean(t)
+	freshState(t)
+	raw := []byte(`{"session_id":"esc-reset","tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + cleanIssueBody(20) + `"}}`)
+
+	t.Setenv("TICKETVOICE_COPE_GATE", fakeSiblingBinary(t, "cope-gate", copeFixture("dangling_end")))
+	if out := runHookWithInput(raw); out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("want deny, got %+v", out)
+	}
+
+	t.Setenv("TICKETVOICE_COPE_GATE", fakeSiblingBinary(t, "cope-gate", ""))
+	if out := runHookWithInput(raw); out == nil || out.HookSpecificOutput.PermissionDecision != "allow" {
+		t.Fatalf("clean rewrite: want allow, got %+v", out)
+	}
+
+	t.Setenv("TICKETVOICE_COPE_GATE", fakeSiblingBinary(t, "cope-gate", copeFixture("dangling_end")))
+	out := runHookWithInput(raw)
+	if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("fresh sequence attempt 1: want deny, got %+v", out)
+	}
+	if strings.Contains(out.HookSpecificOutput.PermissionDecisionReason, "Since the last attempt") {
+		t.Fatalf("a reset sequence must not carry delta text from the old one: %q", out.HookSpecificOutput.PermissionDecisionReason)
+	}
+}
+
+// Two different tickets that happen to share a session, tool, and kind must not share one retry
+// counter — an issueId anchors the sequence to "this specific ticket," the same problem
+// plancheck's PlanHash solves for a re-planned objective sharing a session.
+func TestRunHookDoesNotConflateDifferentTicketsInOneSession(t *testing.T) {
+	clean(t)
+	freshState(t)
+	t.Setenv("TICKETVOICE_COPE_GATE", fakeSiblingBinary(t, "cope-gate", copeFixture("dangling_end")))
+
+	ticketA := []byte(`{"session_id":"esc-anchor","tool_name":"mcp__linear__save_comment","tool_input":{"issueId":"ABC-1","body":"` + words(20) + `"}}`)
+	ticketB := []byte(`{"session_id":"esc-anchor","tool_name":"mcp__linear__save_comment","tool_input":{"issueId":"ABC-2","body":"` + words(20) + `"}}`)
+
+	if out := runHookWithInput(ticketA); out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("ticket A attempt 1: want deny, got %+v", out)
+	}
+	if out := runHookWithInput(ticketA); out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("ticket A attempt 2: want deny, got %+v", out)
+	}
+
+	// A different ticket, same session/tool/kind, hitting the same rule on its own first try must
+	// not read as ticket A's attempt 3 and get waved through.
+	out := runHookWithInput(ticketB)
+	if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("ticket B's own attempt 1 must still deny, got %+v", out)
+	}
+	if strings.Contains(out.HookSpecificOutput.PermissionDecisionReason, "Since the last attempt") {
+		t.Fatalf("ticket B must not inherit ticket A's delta text: %q", out.HookSpecificOutput.PermissionDecisionReason)
 	}
 }
 
