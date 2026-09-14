@@ -21,7 +21,18 @@ import (
 // fenced or structured about it. The gaps around "impact" and ":" are restricted to [ \t] rather
 // than \s so they can't cross a newline and match content on a following line instead — an early
 // draft used \s* here and "Impact:\n\nMore text." matched, which is wrong.
-var impactLinePattern = regexp.MustCompile(`(?im)^[ \t]*impact[ \t]*:[ \t]*\S`)
+//
+// The optional agent tag in front is not cosmetic. budgetgate.AgentTag prefixes an agent-written
+// description with "🤖 ", so a writer who leads with the impact — the most natural thing to do, and
+// what the missingReason below asks for — produces "🤖 Impact: ..." and this check called it absent.
+// The workaround was to put the tag on its own line, which then failed main.go's own already-tagged
+// test (it compares against "🤖 " WITH the trailing space) and got a second tag prepended. Two rules
+// pushing in opposite directions, with no wording that satisfied both. Measured 2026-09-14: three
+// rejections in a row on descriptions that each did carry an impact line.
+//
+// Position is deliberately not constrained. (?m) means any line, so leading, trailing and middle all
+// pass — the requirement is that the impact is STATED, not where it sits.
+var impactLinePattern = regexp.MustCompile(`(?im)^[ \t]*(?:\x{1F916}[ \t]*)*impact[ \t]*:[ \t]*\S`)
 
 const missingReason = `This issue description has no impact line. Add one, in plain language a PM or exec would understand:
 

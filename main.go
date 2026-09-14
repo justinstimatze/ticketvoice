@@ -309,6 +309,11 @@ func linearIdentity(raw json.RawMessage) string {
 // issue or PR the call is already about, not one it's about to create.
 var ghWriteTargetID = regexp.MustCompile(`\b(?:issue|pr)\s+(?:comment|edit)\s+(\d+)\b`)
 
+// agentTagRune is budgetgate.AgentTag without its trailing space, for the already-tagged test. What
+// follows the emoji is the writer's business — a space, a newline, nothing — and only the emoji
+// itself says whether a body carries the tag.
+const agentTagRune = "\U0001F916"
+
 // ghWriteIdentity mirrors linearIdentity for a Bash gh-write call. A create call has no target
 // yet, so it returns "" the same way a fresh Linear issue does.
 func ghWriteIdentity(command string) string {
@@ -358,7 +363,11 @@ func taggedLinearInput(tool string, raw json.RawMessage, kind string) json.RawMe
 		return nil
 	}
 	var val string
-	if json.Unmarshal(rawVal, &val) != nil || strings.HasPrefix(val, budgetgate.AgentTag) {
+	// Already-tagged is tested on the RUNE, not on AgentTag's "🤖 " with its trailing space. A body
+	// that opens "🤖\n\nImpact: ..." — tag on its own line, which is what a writer does when the
+	// impact leads — is tagged, and comparing against the spaced form read it as untagged and
+	// prepended a second one. Observed live 2026-09-14: descriptions posted with "🤖 🤖".
+	if json.Unmarshal(rawVal, &val) != nil || strings.HasPrefix(strings.TrimLeft(val, " \t"), agentTagRune) {
 		return nil
 	}
 	tagged, err := json.Marshal(budgetgate.AgentTag + val)
