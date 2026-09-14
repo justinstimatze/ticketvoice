@@ -17,6 +17,10 @@ import (
 
 func words(n int) string { return strings.TrimSpace(strings.Repeat("word ", n)) }
 
+// Comfortably past the budget, derived rather than written down. A literal here is how three
+// over-budget fixtures silently became under-budget ones when IssueBudget moved 150 -> 200.
+var overBudgetWords = defaultIssueBudget + 50
+
 // cleanRewrittenText is words(n) plus an impact line, for a fake autorewrite server's response —
 // unlike cleanIssueBody (below), which embeds a literal backslash-n pair meant to be spliced raw
 // into hand-built JSON text, this uses a real newline byte, because it goes through json.Marshal
@@ -203,9 +207,9 @@ func TestExtractProseIgnoresNonGhWriteBash(t *testing.T) {
 // Injure the thing it guards: the real over-budget ticket body was 238 words and must trip the
 // budget, while the 118-word rewrite must not. A gate nobody has watched fail is not a gate.
 func TestBudgetBoundary(t *testing.T) {
-	over, budget, _ := prose("mcp__linear__save_issue", json.RawMessage(`{"description":"`+words(238)+`"}`))
+	over, budget, _ := prose("mcp__linear__save_issue", json.RawMessage(`{"description":"`+words(overBudgetWords)+`"}`))
 	if proseWords(over) <= budget {
-		t.Fatalf("238 words did not exceed the %d-word budget", budget)
+		t.Fatalf("%d words did not exceed the %d-word budget", overBudgetWords, budget)
 	}
 	under, _, _ := prose("mcp__linear__save_issue", json.RawMessage(`{"description":"`+words(118)+`"}`))
 	if proseWords(under) > budget {
@@ -216,12 +220,16 @@ func TestBudgetBoundary(t *testing.T) {
 // evaluate is the single code path both the hook and --check run through; this is the one place
 // that would miss a divergence between them.
 func TestEvaluateMatchesBudget(t *testing.T) {
-	if over, reason := evaluate(words(150), "issue description", defaultIssueBudget); over || reason != "" {
-		t.Fatalf("150 words against a 150-word budget must not trip: over=%v reason=%q", over, reason)
+	// Derived from the constant, not written as a literal. The literal 150 here passed unchanged
+	// when the budget moved to 200 — it was asserting "150 words is under the budget", which stays
+	// true for any larger budget and so stopped testing the boundary at all.
+	atBudget, overBudget := defaultIssueBudget, defaultIssueBudget+1
+	if over, reason := evaluate(words(atBudget), "issue description", defaultIssueBudget); over || reason != "" {
+		t.Fatalf("%d words against a %d-word budget must not trip: over=%v reason=%q", atBudget, defaultIssueBudget, over, reason)
 	}
-	over, reason := evaluate(words(151), "issue description", defaultIssueBudget)
-	if !over || !strings.Contains(reason, "151 words") || !strings.Contains(reason, "1 over") {
-		t.Fatalf("151 words must trip with a reason naming the overage: over=%v reason=%q", over, reason)
+	over, reason := evaluate(words(overBudget), "issue description", defaultIssueBudget)
+	if !over || !strings.Contains(reason, fmt.Sprintf("%d words", overBudget)) || !strings.Contains(reason, "1 over") {
+		t.Fatalf("%d words must trip with a reason naming the overage: over=%v reason=%q", overBudget, over, reason)
 	}
 }
 
@@ -478,13 +486,13 @@ func TestRunHookNeverTagsAPatch(t *testing.T) {
 func TestRunHookReasonCarriesAllThreeFindingsWhenOverBudgetAndBothFlag(t *testing.T) {
 	t.Setenv("TICKETVOICE_COPE_GATE", fakeSiblingBinary(t, "cope-gate", "forked_end: 1 violation(s)"))
 	t.Setenv("TICKETVOICE_BASANITE", fakeSiblingBinary(t, "basanite", "load-bearing ×1 → supporting"))
-	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + words(200) + `"}}`)
+	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + words(overBudgetWords) + `"}}`)
 	out := runHookWithInput(raw)
 	if out == nil {
 		t.Fatal("over-budget ticket must be denied")
 	}
 	reason := out.HookSpecificOutput.PermissionDecisionReason
-	if !strings.Contains(reason, "200 words") || !strings.Contains(reason, "forked_end") || !strings.Contains(reason, "load-bearing") {
+	if !strings.Contains(reason, fmt.Sprintf("%d words", overBudgetWords)) || !strings.Contains(reason, "forked_end") || !strings.Contains(reason, "load-bearing") {
 		t.Fatalf("reason must carry the word count and both siblings' findings: %q", reason)
 	}
 }
@@ -554,7 +562,7 @@ func TestRunHookKeepsDenyingWhileTheViolationSetShrinks(t *testing.T) {
 func TestRunHookNeverEscalatesPastBudget(t *testing.T) {
 	clean(t)
 	freshState(t)
-	raw := []byte(`{"session_id":"esc-budget","tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + words(200) + `"}}`)
+	raw := []byte(`{"session_id":"esc-budget","tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + words(overBudgetWords) + `"}}`)
 	for i := 1; i <= 4; i++ {
 		out := runHookWithInput(raw)
 		if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
@@ -726,7 +734,7 @@ func TestRunHookAutoRewriteNeverAttemptedWhenCitationsFlagged(t *testing.T) {
 	t.Setenv("TICKETVOICE_LINEAR_TOKEN", "") // no Linear client → citations can't be the trigger here,
 	// so force it via a SHA citation against a real repo instead.
 
-	desc := words(200) + " `deadbeef1234`" // a backtick-fenced bogus SHA, confirmed-flagged since cwd is a real repo below
+	desc := words(overBudgetWords) + " `deadbeef1234`" // a backtick-fenced bogus SHA, confirmed-flagged since cwd is a real repo below
 	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + desc + `"},"cwd":"` + mustGitRepo(t) + `"}`)
 	out := runHookWithInput(raw)
 	if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
@@ -743,7 +751,7 @@ func TestRunHookAutoRewriteNeverAttemptedWhenImpactFlagged(t *testing.T) {
 	isolateAutorewriteEnv(t)
 	_, calls := fakeAutorewriteServer(t, cleanRewrittenText(20))
 
-	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + words(200) + `"}}`) // over budget, no Impact: line
+	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + words(overBudgetWords) + `"}}`) // over budget, no Impact: line
 	out := runHookWithInput(raw)
 	if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
 		t.Fatalf("a missing-impact-line write must still deny, got %+v", out)
@@ -759,7 +767,7 @@ func TestRunHookAutoRewriteNeverAttemptedForBashCalls(t *testing.T) {
 	isolateAutorewriteEnv(t)
 	_, calls := fakeAutorewriteServer(t, "irrelevant")
 
-	raw := []byte(`{"tool_name":"Bash","tool_input":{"command":"gh-write issue create --title T <<'EOF'\n` + words(200) + `\nEOF\n"}}`)
+	raw := []byte(`{"tool_name":"Bash","tool_input":{"command":"gh-write issue create --title T <<'EOF'\n` + words(overBudgetWords) + `\nEOF\n"}}`)
 	runHookWithInput(raw)
 	if *calls != 0 {
 		t.Fatalf("a Bash/gh-write call must never attempt a rewrite (no field to apply it to), got %d calls", *calls)
@@ -772,7 +780,7 @@ func TestRunHookAutoRewriteNeverAttemptedForAPatch(t *testing.T) {
 	isolateAutorewriteEnv(t)
 	_, calls := fakeAutorewriteServer(t, "irrelevant")
 
-	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"id":"ABC-1","patch":[{"op":"append","text":"` + words(200) + `"}]}}`)
+	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"id":"ABC-1","patch":[{"op":"append","text":"` + words(overBudgetWords) + `"}]}}`)
 	runHookWithInput(raw)
 	if *calls != 0 {
 		t.Fatalf("a patch call must never attempt a rewrite, got %d calls", *calls)

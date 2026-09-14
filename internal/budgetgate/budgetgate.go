@@ -34,9 +34,16 @@ func AgentTagEnabled() bool {
 }
 
 // Budgets in words of prose, fenced code excluded. An issue body carries a mechanism, its
-// evidence, the exposure and the fix; a comment carries one of those.
+// evidence, the exposure, the fix, and a leading plain-language impact line; a comment carries one
+// of those.
+//
+// IssueBudget was 150 until 2026-09-14. The impact line arrived after that number was set and it is
+// the one slot written for a reader who cannot open the file paths, so it cannot be compressed the
+// way the technical slots can — 150 left real tickets choosing between the mechanism and the
+// impact. 200 also puts the budget at headerFloor rather than below it, so the two constants agree
+// about when a body is long enough to deserve structure instead of contradicting each other.
 const (
-	IssueBudget   = 150
+	IssueBudget   = 200
 	CommentBudget = 120
 	// Below this, section headers cost more lines than the structure they buy.
 	headerFloor = 200

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -141,6 +142,8 @@ func TestRunForwardsPositionalIDForCommentAndEdit(t *testing.T) {
 	}
 }
 
+// Derived, not a literal: `words(200)` was this fixture until 2026-09-14 and stopped being
+// over budget the moment IssueBudget reached 200.
 func words(n int) string { return strings.TrimSpace(strings.Repeat("word ", n)) }
 
 // The whole point of the backstop (see the package doc) is that it works no matter how the body
@@ -149,14 +152,14 @@ func TestRunRefusesOverBudgetBody(t *testing.T) {
 	noSiblings(t)
 	fakeGhOnPath(t)
 	var out, errb bytes.Buffer
-	code := run([]string{"issue", "create", "--title", "T"}, strings.NewReader(words(200)), &out, &errb)
+	code := run([]string{"issue", "create", "--title", "T"}, strings.NewReader(words(budgetgate.IssueBudget+50)), &out, &errb)
 	if code == 0 {
 		t.Fatalf("over-budget body must not exit 0")
 	}
 	if strings.Contains(out.String(), "ARGS:") {
 		t.Fatalf("gh must never be invoked for a refused body, got stdout %q", out.String())
 	}
-	if !strings.Contains(errb.String(), "200 words") {
+	if !strings.Contains(errb.String(), fmt.Sprintf("%d words", budgetgate.IssueBudget+50)) {
 		t.Fatalf("stderr must name the overage: %q", errb.String())
 	}
 }
