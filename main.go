@@ -82,6 +82,38 @@ func buildVersion() string {
 	return rev
 }
 
+// linearTools are the official Linear MCP server's write tools. Claude Code names an MCP tool
+// `mcp__<server>__<tool>`, and <server> is whatever the local config calls it — `linear`,
+// `linear-official`, anything — so matching the server segment breaks on a rename (it did: every
+// write through `linear-official` went unscored). The tool segment is Linear's own and stable, so
+// match on that and treat any server name as the canonical `mcp__linear__` form.
+var linearTools = map[string]string{
+	// The official server (mcp.linear.app).
+	"save_issue": "save_issue", "save_comment": "save_comment",
+	"save_diff_comment": "save_diff_comment", "submit_diff_review": "submit_diff_review",
+	// @tacticlaunch/mcp-linear, which carries the same prose in the same fields — `description` on
+	// an issue, `body` on a comment — so each maps onto the official tool whose checks already fit.
+	"linear_createIssue": "save_issue", "linear_updateIssue": "save_issue",
+	"linear_createComment": "save_comment", "linear_updateComment": "save_comment",
+}
+
+// canonicalTool maps `mcp__<any server>__<linear write tool>` onto the `mcp__linear__` form the
+// checks below are written against.
+func canonicalTool(tool string) string {
+	rest, ok := strings.CutPrefix(tool, "mcp__")
+	if !ok {
+		return tool
+	}
+	i := strings.LastIndex(rest, "__")
+	if i < 0 {
+		return tool
+	}
+	if canonical, ok := linearTools[rest[i+2:]]; ok {
+		return "mcp__linear__" + canonical
+	}
+	return tool
+}
+
 type hookInput struct {
 	SessionID string          `json:"session_id"`
 	ToolName  string          `json:"tool_name"`
@@ -583,6 +615,7 @@ func runHookWithInput(raw []byte) *hookOutput {
 	if json.Unmarshal(raw, &in) != nil {
 		return nil
 	}
+	in.ToolName = canonicalTool(in.ToolName)
 	text, rawBudget, kind := extractProse(in.ToolName, in.ToolInput, in.Cwd)
 	if text == "" {
 		return nil

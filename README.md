@@ -230,7 +230,7 @@ directory on `PATH`:
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "mcp__linear__save_issue|mcp__linear__save_comment|mcp__linear__save_diff_comment|mcp__linear__submit_diff_review|Bash",
+        "matcher": "mcp__.*__(save_issue|save_comment|save_diff_comment|submit_diff_review|linear_createIssue|linear_updateIssue|linear_createComment|linear_updateComment)|Bash",
         "hooks": [
           { "type": "command", "command": "/home/you/go/bin/ticketvoice" }
         ]

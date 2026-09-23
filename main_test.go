@@ -882,3 +882,38 @@ func TestRunCheckAcceptsReadmeWhySection(t *testing.T) {
 		t.Fatalf("README's Why section no longer fits its own budget: %s", reason)
 	}
 }
+
+func TestCanonicalToolMapsTheOfficialServerAlias(t *testing.T) {
+	cases := map[string]string{
+		"mcp__linear-official__save_issue":       "mcp__linear__save_issue",
+		"mcp__linear-official__save_comment":     "mcp__linear__save_comment",
+		"mcp__linear__save_issue":                "mcp__linear__save_issue",
+		"Bash":                                   "Bash",
+		"mcp__linear-full__linear_createIssue":   "mcp__linear__save_issue",
+		"mcp__linear__linear_updateIssue":        "mcp__linear__save_issue",
+		"mcp__linear-full__linear_createComment": "mcp__linear__save_comment",
+		"mcp__linear__linear_updateComment":      "mcp__linear__save_comment",
+		"mcp__linear-full__linear_getIssueById":  "mcp__linear-full__linear_getIssueById",
+		"mcp__renamed-anything__save_issue":      "mcp__linear__save_issue",
+		"mcp__linear-official__list_issues":      "mcp__linear-official__list_issues",
+	}
+	for in, want := range cases {
+		if got := canonicalTool(in); got != want {
+			t.Errorf("canonicalTool(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestAnOfficialServerWriteIsScoredNotIgnored(t *testing.T) {
+	raw := []byte(`{"session_id":"s","tool_name":"mcp__linear-official__save_comment","tool_input":{"body":"` + words(overBudgetWords) + `"}}`)
+	if runHookWithInput(raw) == nil {
+		t.Fatal("an over-budget comment through mcp__linear-official__save_comment produced no verdict; the alias is not reaching the checks")
+	}
+}
+
+func TestATacticlaunchCommentIsScored(t *testing.T) {
+	raw := []byte(`{"session_id":"s","tool_name":"mcp__linear-full__linear_createComment","tool_input":{"issueId":"CUR-1","body":"` + words(overBudgetWords) + `"}}`)
+	if runHookWithInput(raw) == nil {
+		t.Fatal("an over-budget comment through linear-full's linear_createComment produced no verdict")
+	}
+}
