@@ -528,22 +528,22 @@ func stalledNote(kind string, attempt int, cope, basanite, impact budgetgate.Jud
 // only runHookWithInput does, exactly once, on whichever branch actually runs.
 func tryAutoRewrite(in hookInput, kind, text string, over bool, budgetReason string, budget int,
 	cope, basanite, citations, impact budgetgate.Judgment, linear *linearclient.Client,
-	rewriter *autorewrite.Client) (candidate json.RawMessage, ok bool) {
+	rewriter *autorewrite.Client) (candidate json.RawMessage, rewritten string, ok bool) {
 
 	if !strings.HasPrefix(in.ToolName, "mcp__linear__") {
-		return nil, false
+		return nil, "", false
 	}
 	if citations.Flagged || impact.Flagged {
-		return nil, false
+		return nil, "", false
 	}
 	if linearTagField(in.ToolName, kind) == "" {
-		return nil, false
+		return nil, "", false
 	}
 	if !over && !cope.Flagged && !basanite.Flagged {
-		return nil, false
+		return nil, "", false
 	}
 	if rewriter == nil {
-		return nil, false
+		return nil, "", false
 	}
 
 	var violations []string
@@ -557,11 +557,12 @@ func tryAutoRewrite(in hookInput, kind, text string, over bool, budgetReason str
 		violations = append(violations, basanite.Note)
 	}
 
+	var err error
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	rewritten, err := rewriter.Rewrite(ctx, kind, text, violations)
+	rewritten, err = rewriter.Rewrite(ctx, kind, text, violations)
 	if err != nil {
-		return nil, false
+		return nil, "", false
 	}
 
 	// Re-validate the CANDIDATE against every check the original text went through, not just the
@@ -581,20 +582,60 @@ func tryAutoRewrite(in hookInput, kind, text string, over bool, budgetReason str
 	wg.Wait()
 
 	if newOver, _ := evaluate(rewritten, kind, budget); newOver {
-		return nil, false
+		return nil, "", false
 	}
 	if newCope.Flagged || newBasanite.Flagged || newCitations.Flagged {
-		return nil, false
+		return nil, "", false
 	}
 	if kind == "issue description" && impactline.Judge(rewritten).Flagged {
-		return nil, false
+		return nil, "", false
+	}
+
+	// A length or voice rewrite may drop prose, never evidence, and may add none: a candidate that
+	// loses a SHA, ticket id, path or URL, or introduces one the author never wrote, is a different
+	// ticket wearing the same title (22 Sep 2026: a rewrite of CUR-1689 invented a go-red criterion).
+	if !sameEvidence(text, rewritten) {
+		return nil, "", false
 	}
 
 	out := taggedRewrite(in.ToolName, in.ToolInput, kind, rewritten)
 	if out == nil {
-		return nil, false
+		return nil, "", false
 	}
-	return out, true
+	return out, rewritten, true
+}
+
+var evidencePats = []*regexp.Regexp{
+	regexp.MustCompile(`\b[0-9a-f]{7,40}\b`),
+	regexp.MustCompile(`\b[A-Z]{2,5}-\d+\b`),
+	regexp.MustCompile(`(?:^|[^\w/])#\d{2,5}\b`),
+	regexp.MustCompile(`https?://[^\s)>\]` + "`" + `]+`),
+	regexp.MustCompile(`[\w./-]+\.(?:ts|js|mjs|svelte|py|sh|yml|yaml|json|md|go|toml|sql)(?::\d+(?:-\d+)?)?`),
+}
+
+// evidenceTokens is the set of citation-shaped tokens in s: SHAs, ticket ids, PR numbers, URLs and
+// file paths. Two texts with the same set carry the same evidence, whatever else changed.
+func evidenceTokens(s string) map[string]bool {
+	out := map[string]bool{}
+	for _, re := range evidencePats {
+		for _, m := range re.FindAllString(s, -1) {
+			out[strings.Trim(strings.TrimSpace(m), "#.,;:")] = true
+		}
+	}
+	return out
+}
+
+func sameEvidence(orig, cand string) bool {
+	a, b := evidenceTokens(orig), evidenceTokens(cand)
+	if len(a) != len(b) {
+		return false
+	}
+	for t := range a {
+		if !b[t] {
+			return false
+		}
+	}
+	return true
 }
 
 // runHookWithInput is the hook's decision logic, taking the raw bytes so the same bytes can be
@@ -684,12 +725,16 @@ func runHookWithInput(raw []byte) *hookOutput {
 	// skips even resolving a client, so a set flag costs nothing beyond the check itself.
 	if os.Getenv("TICKETVOICE_NO_AUTOREWRITE") == "" {
 		rewriter, _ := autorewrite.New(in.Cwd)
-		if candidate, ok := tryAutoRewrite(in, kind, text, over, budgetReason, budget, cope, basanite, citations, impact, linear, rewriter); ok {
+		if candidate, rewritten, ok := tryAutoRewrite(in, kind, text, over, budgetReason, budget, cope, basanite, citations, impact, linear, rewriter); ok {
 			attemptstate.Clear(key)
 			var out hookOutput
 			out.HookSpecificOutput.HookEventName = "PreToolUse"
 			out.HookSpecificOutput.PermissionDecision = "allow"
 			out.HookSpecificOutput.UpdatedInput = candidate
+			// Say so. A silent swap leaves the caller believing its own draft was stored.
+			out.HookSpecificOutput.AdditionalContext = fmt.Sprintf("ticketvoice rewrote this %s before saving it "+
+				"(your draft was flagged for length or voice). What was stored:\n\n%s\n\nIf that lost or changed "+
+				"anything you meant, save your own revision over it.", kind, rewritten)
 			return &out
 		}
 	}

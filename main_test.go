@@ -684,6 +684,45 @@ func TestRunHookAutoRewriteSucceedsAndAllows(t *testing.T) {
 	if *calls != 1 {
 		t.Fatalf("want exactly one rewrite call, got %d", *calls)
 	}
+	if ctx := out.HookSpecificOutput.AdditionalContext; !strings.Contains(ctx, "ticketvoice rewrote") ||
+		!strings.Contains(ctx, cleanRewrittenText(20)) {
+		t.Fatalf("a rewrite must be disclosed with the stored text, got context %q", ctx)
+	}
+}
+
+// A rewrite that introduces a citation the author never wrote is a different ticket: it must fall
+// through to the ordinary deny, never be stored. 22 Sep 2026: a stored rewrite of CUR-1689 came
+// back with an invented go-red criterion and bare ticket ids.
+func TestRunHookAutoRewriteRejectsACandidateThatInventsEvidence(t *testing.T) {
+	clean(t)
+	freshState(t)
+	isolateAutorewriteEnv(t)
+	fakeAutorewriteServer(t, cleanRewrittenText(20)+" See CUR-9999.")
+
+	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + cleanIssueBody(200) + `"}}`)
+	out := runHookWithInput(raw)
+	if out != nil && out.HookSpecificOutput.PermissionDecision == "allow" && out.HookSpecificOutput.UpdatedInput != nil {
+		t.Fatalf("a rewrite that adds CUR-9999 must not be stored, got %+v", out)
+	}
+}
+
+func TestSameEvidenceNamesTheContract(t *testing.T) {
+	orig := "Broke in 0fe9cfbe9c, see `a.ts:12`, #1258 and https://x.y/z (CUR-12)."
+	cases := []struct {
+		name string
+		cand string
+		want bool
+	}{
+		{"shorter prose, every citation kept", "Broke in 0fe9cfbe9c: `a.ts:12`, #1258, https://x.y/z, CUR-12.", true},
+		{"a dropped SHA is lost evidence", "Broke: `a.ts:12`, #1258, https://x.y/z, CUR-12.", false},
+		{"a dropped URL is lost evidence", "Broke in 0fe9cfbe9c: `a.ts:12`, #1258, CUR-12.", false},
+		{"an added ticket id is invented evidence", "Broke in 0fe9cfbe9c: `a.ts:12`, #1258, https://x.y/z, CUR-12, CUR-13.", false},
+	}
+	for _, c := range cases {
+		if got := sameEvidence(orig, c.cand); got != c.want {
+			t.Errorf("%s: sameEvidence = %v, want %v", c.name, got, c.want)
+		}
+	}
 }
 
 // The rewrite endpoint answers, but cope still flags the candidate on re-validation (cope-gate is
