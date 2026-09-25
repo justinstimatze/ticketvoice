@@ -107,12 +107,18 @@ func BudgetFor(base int) int {
 // only — what to do about it differs by caller (a hook can deny and let Claude retry; a CLI can
 // only refuse and explain), so that line is each caller's own to append.
 func Evaluate(text, kind string, budget int) (over bool, reason string) {
+	return EvaluateWith(text, kind, budget, slots)
+}
+
+// EvaluateWith is Evaluate with the advice on what to keep supplied by the caller, for text that
+// is one part of a ticket rather than a whole body or comment (a single description section).
+func EvaluateWith(text, kind string, budget int, guidance string) (over bool, reason string) {
 	words := ProseWords(text)
 	if words <= budget {
 		return false, ""
 	}
 	reason = fmt.Sprintf("This %s is %d words of prose against a %d-word budget — %d over.\n\n%s",
-		kind, words, budget, words-budget, slots)
+		kind, words, budget, words-budget, guidance)
 	if h := HeaderCount(text); h > 0 && words < headerFloor {
 		reason += fmt.Sprintf("\n\nIt also carries %d section header(s) under %d words, which cost two lines each and imply more document than there is.",
 			h, headerFloor)

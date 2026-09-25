@@ -1,5 +1,22 @@
 # Changelog
 
+## Judge linear-strict's section writes as sections — 2026-09-25
+
+[linear-strict](https://github.com/justinstimatze/linear-strict) writes a ticket as named description
+sections, patched one at a time: `set_state`, `comment` (text plus an optional patch) and
+`create_issue`. Its hook used to pass each section in disguised as a `save_comment`, so an Observed
+section got the comment's 120-word budget and its four-slot advice, and a rewrite of one section
+could not be put back, which turned it into a refusal carrying the whole rewritten ticket.
+
+ticketvoice now reads those three tools itself, on any MCP server whose name contains "linear".
+A comment's text and each section are judged on their own. Cause, Fix and any other prose section
+get 120 words with advice written for that section. Observed, Done when and Open questions are
+lists that grow as evidence lands, so the section has no total; each line gets 40 words instead.
+cope and basanite skip the list sections: on a canary replay of 71 real calls, every hit they made
+on an Observed section read two evidence lines as one sentence. Citations are still checked there.
+A rewrite of a prose section goes back into that section, with no agent tag, since the server heads
+its own writes. `set_status` carries no new text and is left alone.
+
 ## Auto-rewrite flagged Linear writes instead of denying them — 2026-09-05
 
 `FEEDBACK.md` (2026-09-04) named a real gap in the deny-and-retry design: the reason is supposed to

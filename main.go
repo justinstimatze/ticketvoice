@@ -656,6 +656,9 @@ func runHookWithInput(raw []byte) *hookOutput {
 	if json.Unmarshal(raw, &in) != nil {
 		return nil
 	}
+	if name, ok := strictTool(in.ToolName); ok {
+		return runStrict(in, strictTools[name])
+	}
 	in.ToolName = canonicalTool(in.ToolName)
 	text, rawBudget, kind := extractProse(in.ToolName, in.ToolInput, in.Cwd)
 	if text == "" {
