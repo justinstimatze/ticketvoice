@@ -1,5 +1,12 @@
 # Changelog
 
+## A refusal no longer quotes cope saying the call proceeds — 2026-09-25
+
+cope's note opens with a paragraph saying its hits are a warning and "the call proceeds", naming
+the tool in the payload it was handed. Relayed inside a ticketvoice refusal, that told the agent
+the opposite of what happened, and on a linear-strict call it named the official server's tool.
+The paragraph is dropped; the hits and their advice are kept.
+
 ## A ticked item's citation gets its own budget — 2026-09-25
 
 linear-strict counts rewording a Done when item as dropping it, so an item keeps the text it was

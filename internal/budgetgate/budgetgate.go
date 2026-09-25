@@ -178,7 +178,23 @@ func judgeSibling(bin string, args []string, rawStdin []byte) Judgment {
 // repeats. That is the correct amount."), so a second caller here alongside cope's own registered
 // hook lands on the same answer independently — no race.
 func JudgeCope(rawStdin []byte) Judgment {
-	return judgeSibling(binPath("TICKETVOICE_COPE_GATE", "cope-gate"), []string{"-pretool"}, rawStdin)
+	j := judgeSibling(binPath("TICKETVOICE_COPE_GATE", "cope-gate"), []string{"-pretool"}, rawStdin)
+	j.Note = dropCopePreamble(j.Note)
+	return j
+}
+
+// cope's note opens by saying its hits are a warning and "the call proceeds", and names the tool
+// in the payload it was handed. Relayed inside a ticketvoice refusal, that sentence contradicts the
+// refusal around it, and for a linear-strict call it names the wrong tool, so it is dropped: whether
+// the call proceeds is ticketvoice's to say.
+func dropCopePreamble(note string) string {
+	if !strings.HasPrefix(note, "cope scored the prose") {
+		return note
+	}
+	if _, rest, found := strings.Cut(note, "\n\n"); found {
+		return strings.TrimSpace(rest)
+	}
+	return note
 }
 
 // JudgeBasanite calls basanite writecheck -no-dedup — the flag basanite added specifically for

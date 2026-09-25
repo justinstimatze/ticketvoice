@@ -85,3 +85,13 @@ func TestCombinedViolationIDsMergesAndSorts(t *testing.T) {
 		}
 	}
 }
+
+func TestDropCopePreamble(t *testing.T) {
+	note := "cope scored the prose this mcp__linear__save_issue call is about to post, in the external lane. This is a warning, not a block: the call proceeds.\n\ndescription: 1 violation(s) — flip×1\n  [flip] ..."
+	if got := dropCopePreamble(note); got != "description: 1 violation(s) — flip×1\n  [flip] ..." {
+		t.Fatalf("preamble not dropped: %q", got)
+	}
+	if got := dropCopePreamble("description: 1 violation(s)"); got != "description: 1 violation(s)" {
+		t.Fatalf("a note without the preamble must pass through, got %q", got)
+	}
+}
