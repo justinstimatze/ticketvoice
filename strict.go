@@ -117,25 +117,30 @@ func (u strictUnit) evaluate() (over bool, reason string) {
 	}
 	var long []string
 	for _, line := range strings.Split(u.text, "\n") {
-		if u.rule.ticks {
-			if item, citation, ok := tickedParts(line); ok {
-				for _, part := range []struct{ name, text string }{{"item", item}, {"citation", citation}} {
-					if n := proseWords(part.text); n > strictLineBudget {
-						long = append(long, fmt.Sprintf("  - %q (its %s is %d words)", strings.TrimSpace(line), part.name, n))
-					}
-				}
-				continue
-			}
-		}
-		if n := proseWords(line); n > strictLineBudget {
-			long = append(long, fmt.Sprintf("  - %q (%d words)", strings.TrimSpace(line), n))
-		}
+		long = append(long, u.overBudget(line)...)
 	}
 	if len(long) == 0 {
 		return false, ""
 	}
 	return true, fmt.Sprintf("This %s has %d line(s) over the %d-word line budget:\n%s\n\n%s",
 		u.label, len(long), strictLineBudget, strings.Join(long, "\n"), u.rule.guidance)
+}
+
+// overBudget describes each part of one list line that runs past strictLineBudget.
+func (u strictUnit) overBudget(line string) []string {
+	var long []string
+	if item, citation, ok := tickedParts(line); ok && u.rule.ticks {
+		for _, part := range [][2]string{{"item", item}, {"citation", citation}} {
+			if n := proseWords(part[1]); n > strictLineBudget {
+				long = append(long, fmt.Sprintf("  - %q (its %s is %d words)", strings.TrimSpace(line), part[0], n))
+			}
+		}
+		return long
+	}
+	if n := proseWords(line); n > strictLineBudget {
+		long = append(long, fmt.Sprintf("  - %q (%d words)", strings.TrimSpace(line), n))
+	}
+	return long
 }
 
 // tickedRe and citationSep match linear-strict's reading of a ticked item: the citation starts at
