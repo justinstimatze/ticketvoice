@@ -1,5 +1,12 @@
 # Changelog
 
+## clause_symmetry only warns on a linear-strict comment — 2026-09-25
+
+A strict comment reports evidence, and "X happened, but Y has not" is often the whole finding. On
+the canary, clause_symmetry refused such a comment twice and the agent cut a fact to get past it.
+When it is cope's only hit on a strict comment, the comment posts and the hit comes back as a
+warning. With any other cope hit, or on a description section, it refuses as before.
+
 ## A refusal no longer quotes cope saying the call proceeds — 2026-09-25
 
 cope's note opens with a paragraph saying its hits are a warning and "the call proceeds", naming

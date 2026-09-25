@@ -215,3 +215,30 @@ func TestStrictTickedItemAndCitationBudgetedApart(t *testing.T) {
 		t.Fatalf("an unticked 45-word item is still over, got %+v", out)
 	}
 }
+
+// On a strict comment clause_symmetry alone warns; with another cope rule it still refuses, and a
+// section is refused for it as before.
+func TestStrictCommentClauseSymmetryOnlyWarns(t *testing.T) {
+	strictEnv(t)
+	t.Setenv("TICKETVOICE_COPE_GATE", fakeSiblingBinary(t, "cope-gate", copeFixture("clause_symmetry")))
+	out := strictCall(t, "mcp__linear-strict__comment", map[string]any{"issue": "ENG-1", "kind": "evidence", "body": words(40)})
+	if out == nil || out.HookSpecificOutput.PermissionDecision == "deny" {
+		t.Fatalf("clause_symmetry alone must not refuse a strict comment, got %+v", out)
+	}
+	if ctx := out.HookSpecificOutput.AdditionalContext; !strings.Contains(ctx, "it was posted") || !strings.Contains(ctx, "clause_symmetry") {
+		t.Errorf("the warning must reach the agent, got %q", ctx)
+	}
+
+	out = strictCall(t, "mcp__linear-strict__set_state", map[string]any{
+		"issue": "ENG-1", "patch": []any{map[string]any{"section": "Cause", "mode": "replace", "body": words(40)}},
+	})
+	if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("a section is still refused for clause_symmetry, got %+v", out)
+	}
+
+	t.Setenv("TICKETVOICE_COPE_GATE", fakeSiblingBinary(t, "cope-gate2", copeFixture("clause_symmetry", "flip")))
+	out = strictCall(t, "mcp__linear-strict__comment", map[string]any{"issue": "ENG-2", "kind": "evidence", "body": words(40)})
+	if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("a flip alongside it must still refuse, got %+v", out)
+	}
+}

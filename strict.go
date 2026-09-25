@@ -200,13 +200,40 @@ func judgeAll(u strictUnit, text, cwd string, linear *linearclient.Client) (cope
 // judgeStrictUnit runs one unit through the same checks and retry rules as a whole body: over
 // budget or a bad citation always denies; a cope or basanite hit is rewritten when a rewrite comes
 // back clean, and lets the write through with a note on the third attempt that shrinks nothing.
+// commentAdvisoryRules are cope rules that warn on a strict comment instead of refusing it. A
+// strict comment reports evidence, and "X happened, but Y has not" is often the whole finding: on
+// the canary, clause_symmetry refused such a sentence twice and the agent cut a fact to get past it
+// (2026-09-25).
+var commentAdvisoryRules = map[string]bool{"cope:clause_symmetry": true}
+
+// advisoryOnly clears a cope judgment on a strict comment whose every hit is advisory, returning
+// the note to pass along as a warning instead.
+func advisoryOnly(u strictUnit, cope budgetgate.Judgment) (budgetgate.Judgment, string) {
+	if !u.comment || !cope.Flagged {
+		return cope, ""
+	}
+	ids := budgetgate.ViolationIDs("cope", cope.Note)
+	if len(ids) == 0 {
+		return cope, ""
+	}
+	for _, id := range ids {
+		if !commentAdvisoryRules[id] {
+			return cope, ""
+		}
+	}
+	return budgetgate.Judgment{}, "cope flagged the comment; it was posted, since this rule only warns on a strict comment. " +
+		"If the hit is right, edit the comment rather than reposting it.\n\n" + cope.Note
+}
+
 func judgeStrictUnit(in hookInput, anchor string, u strictUnit, linear *linearclient.Client, rewriter *autorewrite.Client) strictVerdict {
 	over, budgetReason := u.evaluate()
 	cope, basanite, citations, citeIDs := judgeAll(u, u.text, in.Cwd, linear)
+	var advisory string
+	cope, advisory = advisoryOnly(u, cope)
 	key := attemptstate.Key{SessionID: in.SessionID, Tool: in.ToolName, Kind: u.label, Anchor: anchor}
 	if !over && !cope.Flagged && !basanite.Flagged && !citations.Flagged {
 		attemptstate.Clear(key)
-		return strictVerdict{}
+		return strictVerdict{note: advisory}
 	}
 
 	// List sections are left to the author: a rewrite of a dated evidence line can break the
