@@ -17,6 +17,21 @@ on an Observed section read two evidence lines as one sentence. Citations are st
 A rewrite of a prose section goes back into that section, with no agent tag, since the server heads
 its own writes. `set_status` carries no new text and is left alone.
 
+## Four fixes from live use — 2026-09-14 to 2026-09-22
+
+- **The issue budget is 200 words, up from 150.** The impact line arrived after 150 was set, and it
+  is written for a reader who can't open the file paths, so it can't be compressed the way the
+  technical slots can. At 150, tickets had to choose between the mechanism and the impact.
+- **The agent tag no longer hides the impact line.** An agent-written description starts with
+  "🤖 ", so one that led with its impact read "🤖 Impact: …", and the impact check called it
+  missing. The check now allows the tag in front, and the already-tagged test matches the emoji
+  whatever follows it, which stops a second tag being added.
+- **Linear writes are matched by tool name under any MCP server name.** Writes through a server
+  registered as `linear-official` or `linear-full` matched nothing and went out unscored.
+- **An auto-rewrite may not add or drop evidence, and says when it was stored.** A rewrite must
+  carry exactly the original's SHAs, ticket ids, PR numbers, URLs and file paths, or it is dropped
+  and the ordinary deny runs. A stored rewrite is disclosed with the text that was stored.
+
 ## Auto-rewrite flagged Linear writes instead of denying them — 2026-09-05
 
 `FEEDBACK.md` (2026-09-04) named a real gap in the deny-and-retry design: the reason is supposed to
