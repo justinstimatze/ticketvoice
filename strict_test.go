@@ -91,6 +91,14 @@ func TestStrictListSectionsSkipTheProseScorers(t *testing.T) {
 	}
 }
 
+func TestStrictCommentAllows150Words(t *testing.T) {
+	strictEnv(t)
+	out := strictCall(t, "mcp__linear-strict__comment", map[string]any{"issue": "ENG-1", "kind": "evidence", "body": words(145)})
+	if out != nil {
+		t.Fatalf("a 145-word strict comment is inside its budget, got %+v", out.HookSpecificOutput)
+	}
+}
+
 func TestStrictCauseGetsItsOwnAdvice(t *testing.T) {
 	strictEnv(t)
 	out := strictCall(t, "mcp__linear-strict__set_state", map[string]any{
@@ -115,14 +123,14 @@ func TestStrictCauseGetsItsOwnAdvice(t *testing.T) {
 func TestStrictCommentAndPatchJudgedApart(t *testing.T) {
 	strictEnv(t)
 	out := strictCall(t, "mcp__linear-strict__comment", map[string]any{
-		"issue": "ENG-1", "kind": "evidence", "body": words(130),
+		"issue": "ENG-1", "kind": "evidence", "body": words(160),
 		"patch": []any{map[string]any{"section": "Observed", "mode": "append", "body": observedLine(10)}},
 	})
 	if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
-		t.Fatalf("a 130-word comment must be refused, got %+v", out)
+		t.Fatalf("a 160-word comment must be refused, got %+v", out)
 	}
 	reason := out.HookSpecificOutput.PermissionDecisionReason
-	if !strings.Contains(reason, "[comment] This comment is 130 words") || strings.Contains(reason, "[Observed section]") {
+	if !strings.Contains(reason, "[comment] This comment is 160 words of prose against a 150-word budget") || strings.Contains(reason, "[Observed section]") {
 		t.Errorf("only the comment should be refused:\n%s", reason)
 	}
 }

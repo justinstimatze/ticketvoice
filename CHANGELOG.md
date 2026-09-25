@@ -1,5 +1,12 @@
 # Changelog
 
+## A linear-strict comment gets 150 words — 2026-09-25
+
+A comment through linear-strict is the log entry for evidence whose detail already lives in the
+description. On the canary, 7 of 67 such comments ran over 120 words. Every cut kept its citations
+except one, which dropped a PR number, and the cost was a retry on one comment in ten. Comments
+through the official server keep 120.
+
 ## Judge linear-strict's section writes as sections — 2026-09-25
 
 [linear-strict](https://github.com/justinstimatze/linear-strict) writes a ticket as named description

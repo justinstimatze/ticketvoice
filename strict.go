@@ -46,6 +46,11 @@ func strictTool(tool string) (name string, ok bool) {
 // past it has started narrating.
 const strictLineBudget = 40
 
+// strictCommentBudget is higher than CommentBudget: a strict comment is the log entry for evidence
+// whose detail already lives in the description. On the canary, drafts cut to fit 120 kept every
+// citation but cost a retry on one comment in ten (2026-09-25).
+const strictCommentBudget = 150
+
 type sectionRule struct {
 	lines    bool // judged line by line against strictLineBudget
 	guidance string
@@ -70,13 +75,14 @@ type strictUnit struct {
 	text    string
 	rule    sectionRule
 	comment bool
+	budget  int
 	set     func(string)
 }
 
 func strictUnits(input map[string]any, field string) []strictUnit {
 	var units []strictUnit
 	if body, ok := input["body"].(string); ok && strings.TrimSpace(body) != "" {
-		units = append(units, strictUnit{label: "comment", text: body, comment: true,
+		units = append(units, strictUnit{label: "comment", text: body, comment: true, budget: strictCommentBudget,
 			rule: sectionRule{guidance: strictCommentGuidance}, set: func(s string) { input["body"] = s }})
 	}
 	list, _ := input[field].([]any)
@@ -96,7 +102,7 @@ func strictUnits(input map[string]any, field string) []strictUnit {
 		if !known {
 			rule = sectionRule{guidance: defaultSectionGuidance}
 		}
-		units = append(units, strictUnit{label: section + " section", text: body, rule: rule,
+		units = append(units, strictUnit{label: section + " section", text: body, rule: rule, budget: defaultCommentBudget,
 			set: func(s string) { entry["body"] = s }})
 	}
 	return units
@@ -105,7 +111,7 @@ func strictUnits(input map[string]any, field string) []strictUnit {
 // evaluate is the budget half of the judgment: the whole text for prose, each line for lists.
 func (u strictUnit) evaluate() (over bool, reason string) {
 	if !u.rule.lines {
-		return budgetgate.EvaluateWith(u.text, u.label, budgetFor(defaultCommentBudget), u.rule.guidance)
+		return budgetgate.EvaluateWith(u.text, u.label, budgetFor(u.budget), u.rule.guidance)
 	}
 	var long []string
 	for _, line := range strings.Split(u.text, "\n") {
@@ -228,7 +234,7 @@ func strictRewrite(cwd string, u strictUnit, over bool, budgetReason string, cop
 	if candidate == "" || !sameEvidence(u.text, candidate) {
 		return "", false
 	}
-	if newOver, _ := (strictUnit{text: candidate, label: u.label, rule: u.rule}).evaluate(); newOver {
+	if newOver, _ := (strictUnit{text: candidate, label: u.label, rule: u.rule, budget: u.budget}).evaluate(); newOver {
 		return "", false
 	}
 	newCope, newBasanite, newCitations, _ := judgeAll(u, candidate, cwd, linear)
