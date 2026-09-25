@@ -185,3 +185,33 @@ func TestStrictRewriteLandsInItsSection(t *testing.T) {
 		t.Errorf("the rewrite must be disclosed, got %q", ctx)
 	}
 }
+
+// A ticked item keeps the text it was written with, so its citation is budgeted on its own:
+// a 36-word item that passed when written must still take a citation.
+func TestStrictTickedItemAndCitationBudgetedApart(t *testing.T) {
+	strictEnv(t)
+	item := "- [X] " + words(36) + " · " + words(14)
+	out := strictCall(t, "mcp__linear-strict__set_state", map[string]any{
+		"issue": "ENG-1", "patch": []any{map[string]any{"section": "Done when", "mode": "replace", "body": item + "\n- [ ] " + words(20)}},
+	})
+	if out != nil {
+		t.Fatalf("a 36-word item with a 14-word citation must pass, got %+v", out.HookSpecificOutput)
+	}
+
+	out = strictCall(t, "mcp__linear-strict__set_state", map[string]any{
+		"issue": "ENG-1", "patch": []any{map[string]any{"section": "Done when", "mode": "replace", "body": "- [x] " + words(10) + " · " + words(45)}},
+	})
+	if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("a 45-word citation must be refused, got %+v", out)
+	}
+	if reason := out.HookSpecificOutput.PermissionDecisionReason; !strings.Contains(reason, "its citation is 45 words") {
+		t.Errorf("the refusal must say it is the citation that runs long:\n%s", reason)
+	}
+
+	out = strictCall(t, "mcp__linear-strict__set_state", map[string]any{
+		"issue": "ENG-1", "patch": []any{map[string]any{"section": "Done when", "mode": "replace", "body": "- [ ] " + words(45)}},
+	})
+	if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("an unticked 45-word item is still over, got %+v", out)
+	}
+}

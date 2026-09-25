@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -53,12 +54,13 @@ const strictCommentBudget = 150
 
 type sectionRule struct {
 	lines    bool // judged line by line against strictLineBudget
+	ticks    bool // a ticked item's text and its citation are judged apart
 	guidance string
 }
 
 var sectionRules = map[string]sectionRule{
 	"observed":       {lines: true, guidance: `One line per observation: YYYY-MM-DD · source · result. The result is what was seen, in a clause. What it means belongs under Cause, and a second observation gets its own line.`},
-	"done when":      {lines: true, guidance: `One checkable item per line: the command or observation that will show it is done. Why it matters belongs under Cause or Fix.`},
+	"done when":      {lines: true, ticks: true, guidance: `One checkable item per line: the command or observation that will show it is done. Why it matters belongs under Cause or Fix.`},
 	"open questions": {lines: true, guidance: `One question per line, each one a single person can answer.`},
 	"cause":          {guidance: `One paragraph: what is broken, and why nothing catches it. If it is not proven, say "Not established" and name the leading account. SHAs and file:line carry the detail; do not narrate what the reader can open.`},
 	"fix":            {guidance: `The change and where it goes (file:line), then how to prove it can go red. Code goes in a fenced block, which the budget does not count.`},
@@ -115,6 +117,16 @@ func (u strictUnit) evaluate() (over bool, reason string) {
 	}
 	var long []string
 	for _, line := range strings.Split(u.text, "\n") {
+		if u.rule.ticks {
+			if item, citation, ok := tickedParts(line); ok {
+				for _, part := range []struct{ name, text string }{{"item", item}, {"citation", citation}} {
+					if n := proseWords(part.text); n > strictLineBudget {
+						long = append(long, fmt.Sprintf("  - %q (its %s is %d words)", strings.TrimSpace(line), part.name, n))
+					}
+				}
+				continue
+			}
+		}
 		if n := proseWords(line); n > strictLineBudget {
 			long = append(long, fmt.Sprintf("  - %q (%d words)", strings.TrimSpace(line), n))
 		}
@@ -124,6 +136,28 @@ func (u strictUnit) evaluate() (over bool, reason string) {
 	}
 	return true, fmt.Sprintf("This %s has %d line(s) over the %d-word line budget:\n%s\n\n%s",
 		u.label, len(long), strictLineBudget, strings.Join(long, "\n"), u.rule.guidance)
+}
+
+// tickedRe and citationSep match linear-strict's reading of a ticked item: the citation starts at
+// the first " · " or " — " after the item's text.
+var (
+	tickedRe    = regexp.MustCompile(`^\s*[-*]\s*\[[xX]\]\s*(.*)$`)
+	citationSep = regexp.MustCompile(`\s(?:·|—)\s`)
+)
+
+// tickedParts splits a ticked item into its text and its citation. The item's text was written
+// when the item was, and linear-strict treats rewording it as dropping the item, so a citation
+// added at tick time must not push a line that already passed over the budget.
+func tickedParts(line string) (item, citation string, ok bool) {
+	m := tickedRe.FindStringSubmatch(line)
+	if m == nil {
+		return "", "", false
+	}
+	loc := citationSep.FindStringIndex(m[1])
+	if loc == nil {
+		return "", "", false
+	}
+	return m[1][:loc[0]], m[1][loc[1]:], true
 }
 
 // siblingPayload is what cope and basanite read: the unit alone, in the official shape they know.

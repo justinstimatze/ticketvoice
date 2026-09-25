@@ -1,5 +1,12 @@
 # Changelog
 
+## A ticked item's citation gets its own budget — 2026-09-25
+
+linear-strict counts rewording a Done when item as dropping it, so an item keeps the text it was
+written with. On the canary, a 36-word item that passed when written was refused once its
+14-word citation was added, with no way to fit both. A ticked item's text and its citation are
+now each held to the 40-word line budget.
+
 ## A linear-strict comment gets 150 words — 2026-09-25
 
 A comment through linear-strict is the log entry for evidence whose detail already lives in the
