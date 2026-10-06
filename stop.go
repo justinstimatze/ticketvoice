@@ -27,7 +27,9 @@ func runStop(stdin io.Reader, stdout io.Writer) int {
 		return 0
 	}
 	var in struct {
-		SessionID string `json:"session_id"`
+		SessionID      string `json:"session_id"`
+		TranscriptPath string `json:"transcript_path"`
+		StopHookActive bool   `json:"stop_hook_active"`
 	}
 	if json.Unmarshal(raw, &in) != nil {
 		return 0
@@ -46,6 +48,14 @@ func runStop(stdin io.Reader, stdout io.Writer) int {
 		live = append(live, p)
 	}
 	if len(live) == 0 {
+		// A turn this hook already held once may end: the agent has seen the freshness block, and
+		// holding it again would loop on an id it can't read (a deleted ticket, a typo).
+		if in.StopHookActive {
+			return 0
+		}
+		if stale := staleTicketMentions(in.TranscriptPath); len(stale) > 0 {
+			_ = json.NewEncoder(stdout).Encode(map[string]string{"decision": "block", "reason": freshReason(stale)})
+		}
 		return 0
 	}
 
