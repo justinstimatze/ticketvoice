@@ -341,6 +341,10 @@ func TestJudgeFileLineCleanWhenOnlyOnARemoteBranch(t *testing.T) {
 	if j.Flagged {
 		t.Fatalf("a path present on origin/develop must not be called nonexistent, got %s", j.Note)
 	}
+	j, _ = Judge(context.Background(), nil, dir, "See `web/e2e/new.spec.ts:90`.")
+	if !j.Flagged || !strings.Contains(j.Note, "2 lines") {
+		t.Fatalf("a branch-only file must still have its line number checked, got %+v", j)
+	}
 	j, _ = Judge(context.Background(), nil, dir, "See `web/e2e/made-up.spec.ts:2`.")
 	if !j.Flagged || !strings.Contains(j.Note, "doesn't exist") {
 		t.Fatalf("a path on no branch must still be flagged, got %+v", j)

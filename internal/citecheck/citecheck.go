@@ -269,8 +269,14 @@ func judgeFileLines(cwd, text string) (notes []string, ids []string) {
 				fi, err = os.Stat(full)
 			}
 		}
-		if err != nil && !filepath.IsAbs(path) && existsOnARemoteBranch(context.Background(), cwd, path) {
-			continue // on a remote branch but not in this checkout; its line count isn't this check's to read
+		if err != nil && !filepath.IsAbs(path) {
+			if data, ok := readFromARemoteBranch(context.Background(), cwd, path); ok {
+				if count := lineCount(data); want > count {
+					notes = append(notes, fmt.Sprintf("%s has %d lines, but %s cites line %d", path, count, path, want))
+					ids = append(ids, fmt.Sprintf("cite:file:%s:%d", path, line))
+				}
+				continue
+			}
 		}
 		if err != nil {
 			notes = append(notes, fmt.Sprintf("%s doesn't exist", path))
@@ -293,43 +299,33 @@ func judgeFileLines(cwd, text string) (notes []string, ids []string) {
 	return notes, ids
 }
 
-// existsOnARemoteBranch reports whether path is in the tree of one of the most recently updated
-// remote-tracking branches. A checkout sitting on a stale or unrelated branch lacks files that
-// exist on the branch the ticket is about (a spec merged to origin/develop after the checkout's
-// branch was cut), and the working tree alone cannot tell that apart from a made-up path.
-func existsOnARemoteBranch(ctx context.Context, cwd, path string) bool {
+// readFromARemoteBranch returns path's contents from the most recently updated remote-tracking
+// branch that has it. A checkout sitting on a stale or unrelated branch lacks files that exist on
+// the branch the ticket is about (a spec merged to origin/develop after the checkout's branch was
+// cut, or a file on a PR still in flight), and the working tree alone cannot tell that apart from
+// a made-up path. Reading the blob keeps the line-number check for those files.
+func readFromARemoteBranch(ctx context.Context, cwd, path string) ([]byte, bool) {
 	if cwd == "" || !isGitRepo(ctx, cwd) {
-		return false
+		return nil, false
 	}
 	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
 	defer cancel()
 	refs, err := exec.CommandContext(ctx, "git", "-C", cwd, "for-each-ref", "--count=20",
 		"--sort=-committerdate", "--format=%(refname)", "refs/remotes").Output()
 	if err != nil {
-		return false
+		return nil, false
 	}
-	var batch strings.Builder
+	rel := filepath.ToSlash(filepath.Clean(path))
 	for _, ref := range strings.Fields(string(refs)) {
 		if strings.HasSuffix(ref, "/HEAD") {
 			continue
 		}
-		fmt.Fprintf(&batch, "%s:%s\n", ref, filepath.ToSlash(filepath.Clean(path)))
-	}
-	if batch.Len() == 0 {
-		return false
-	}
-	cmd := exec.CommandContext(ctx, "git", "-C", cwd, "cat-file", "--batch-check")
-	cmd.Stdin = strings.NewReader(batch.String())
-	out, err := cmd.Output()
-	if err != nil {
-		return false
-	}
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.Contains(line, " blob ") {
-			return true
+		data, err := exec.CommandContext(ctx, "git", "-C", cwd, "show", ref+":"+rel).Output()
+		if err == nil && len(data) <= maxCiteFileBytes {
+			return data, true
 		}
 	}
-	return false
+	return nil, false
 }
 
 // isGitRepo reports whether cwd is inside a git work tree. This exists because git cat-file -e
