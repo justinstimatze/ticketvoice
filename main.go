@@ -784,6 +784,8 @@ func main() {
 			os.Exit(runCheck(os.Args[2:]))
 		case "stop":
 			os.Exit(runStop(os.Stdin, os.Stdout))
+		case "prompt":
+			os.Exit(runPrompt(os.Stdin, os.Stdout))
 		case "drop":
 			os.Exit(runDrop(os.Args[2:], os.Stdout))
 		}

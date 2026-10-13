@@ -77,21 +77,14 @@ func blocksOf(raw json.RawMessage) ([]contentBlock, string) {
 	return bs, ""
 }
 
-// staleTicketMentions returns, sorted, each ticket id the agent wrote in this turn's text that has
-// no full read after the newest compaction boundary. An unreadable transcript yields nothing: the
-// check fails open, because a Stop hook that can't read must not hold the session.
-func staleTicketMentions(transcriptPath string) []string {
-	keys := freshKeys()
-	if transcriptPath == "" || len(keys) == 0 {
-		return nil
-	}
-	idRe := regexp.MustCompile(`\b(?:` + strings.Join(keys, "|") + `)-\d+\b`)
+// entriesSinceCompaction decodes the transcript's user and assistant lines after the newest
+// compaction boundary. ok is false when the file can't be opened.
+func entriesSinceCompaction(transcriptPath string) ([]transcriptEntry, bool) {
 	f, err := os.Open(transcriptPath)
 	if err != nil {
-		return nil
+		return nil, false
 	}
 	defer f.Close()
-
 	// A long session's transcript runs to hundreds of thousands of lines, and decoding all of them
 	// took 7.6 s against the hook's 5 s timeout. Only lines after the newest compaction matter, and
 	// a byte search finds it without decoding anything before it.
@@ -119,6 +112,22 @@ func staleTicketMentions(transcriptPath string) []string {
 			continue // a torn line is skipped, not fatal
 		}
 		entries = append(entries, e)
+	}
+	return entries, true
+}
+
+// staleTicketMentions returns, sorted, each ticket id the agent wrote in this turn's text that has
+// no full read after the newest compaction boundary. An unreadable transcript yields nothing: the
+// check fails open, because a Stop hook that can't read must not hold the session.
+func staleTicketMentions(transcriptPath string) []string {
+	keys := freshKeys()
+	if transcriptPath == "" || len(keys) == 0 {
+		return nil
+	}
+	idRe := regexp.MustCompile(`\b(?:` + strings.Join(keys, "|") + `)-\d+\b`)
+	entries, ok := entriesSinceCompaction(transcriptPath)
+	if !ok {
+		return nil
 	}
 
 	boundary, turnStart := -1, -1
