@@ -163,25 +163,35 @@ func RestateFlags(entries []Entry) []string {
 		if e.Minor || e.Summary == "" {
 			continue
 		}
-		have := map[string]bool{}
-		for _, w := range contentWords(e.Summary) {
-			have[w] = true
-		}
+		have := wordSet(e.Summary)
 		body := strings.TrimSpace(strings.TrimPrefix(e.Text, e.Summary))
 		for _, sent := range strings.Split(sentenceEnd.ReplaceAllString(body, "$1\n"), "\n") {
-			words := contentWords(sent)
-			shared := 0
-			for _, w := range words {
-				if have[w] {
-					shared++
-				}
-			}
-			if len(words) > 0 && shared >= RestateMin && float64(shared) >= RestateShare*float64(len(words)) {
+			if restates(sent, have) {
 				flags = append(flags, fmt.Sprintf("restate: story %q says again in its body what its summary says (%q); cut the sentence or say what the summary left out", e.Title, clip(strings.TrimSpace(sent), 80)))
 			}
 		}
 	}
 	return flags
+}
+
+func wordSet(s string) map[string]bool {
+	set := map[string]bool{}
+	for _, w := range contentWords(s) {
+		set[w] = true
+	}
+	return set
+}
+
+// restates reports whether enough of sent's content words are already in have.
+func restates(sent string, have map[string]bool) bool {
+	words := contentWords(sent)
+	shared := 0
+	for _, w := range words {
+		if have[w] {
+			shared++
+		}
+	}
+	return shared >= RestateMin && float64(shared) >= RestateShare*float64(len(words))
 }
 
 // Runner runs a scorer: its name, its arguments, and the file it reads. Tests replace it.
