@@ -25,9 +25,16 @@ comments, and PR-review-thread ("diff") comments and reviews — and GitHub issu
 only way this hook can see a GitHub body at all (see that section for why a plain
 `gh issue create --body "..."` can't be gated).
 
-Deliberately not covered on the Linear side: project/initiative descriptions, status updates,
+Deliberately not gated on the Linear side: project/initiative descriptions, status updates,
 documents, milestones, release notes. Same reasoning as GitHub's release notes below — a different
 genre of writing than a ticket, not a gap that was missed.
+
+A release note gets a check of its own, run on request rather than as a gate:
+`ticketvoice --check note.md -field release-note [-json]`. It holds each entry to a budget (a story
+at 90 words, a minor line at 30), flags a story body sentence that repeats the story's summary, and
+runs the note through `cope-gate` with an embedded release-note card and through `basanite`. A
+scorer that can't run is named under `notRun`, never read as clean. Exit 1 means something was
+flagged.
 
 ## Why
 

@@ -31,7 +31,7 @@ A file you attach also appears in My files.
 func TestEntriesReadsStoriesAndMinorLinesAsLinearStoresThem(t *testing.T) {
 	got := Entries(stored)
 	want := []Entry{
-		{Title: "See when each source was published", Text: "Each source shows its date. A page with no date says so."},
+		{Title: "See when each source was published", Text: "Each source shows its date. A page with no date says so.", Summary: "Each source shows its date."},
 		{Title: "Smoother attachments", Text: "A file you attach also appears in My files.", Minor: true},
 		{Title: "Smoother attachments", Text: "The sign-in code field shows a placeholder.", Minor: true},
 	}
@@ -54,6 +54,40 @@ func TestBudgetFlagsTheOneStoryThatOutgrowsTheOthers(t *testing.T) {
 	})
 	if len(flags) != 2 || !strings.Contains(flags[0], `story "Long" is 91 words against 90`) || !strings.Contains(flags[1], "minor line") {
 		t.Fatalf("flags = %q", flags)
+	}
+}
+
+// The story the drafter wrote for the 31 October release: both body sentences repeat the summary.
+const restated = `## Choose GLM 5.2 in Alpha
+(Alpha)
+GLM 5.2 is in the model picker, and each answer names the model and provider that served it.
+
+You can select GLM 5.2 from the model picker in Alpha.
+
+The footer under each answer names the model that wrote it and the provider that served it.
+`
+
+func TestRestateFlagsEachBodySentenceThatRepeatsTheSummary(t *testing.T) {
+	flags := RestateFlags(Entries(restated))
+	if len(flags) != 2 || !strings.Contains(flags[0], "You can select GLM 5.2") || !strings.Contains(flags[1], "The footer under each answer") {
+		t.Fatalf("flags = %q", flags)
+	}
+}
+
+func TestRestateLeavesABodyThatAddsToTheSummaryAlone(t *testing.T) {
+	note := `## Choose GLM 5.2 in Alpha
+(Alpha)
+GLM 5.2 is in the model picker, and each answer names the model and provider that served it.
+
+It reads files up to 200 pages and answers in 30 languages.
+
+The name links to the provider's terms, so you can check where your words went.
+`
+	if flags := RestateFlags(Entries(note)); len(flags) != 0 {
+		t.Fatalf("flags = %q", flags)
+	}
+	if flags := RestateFlags(Entries(stored)); len(flags) != 0 {
+		t.Fatalf("stored: flags = %q", flags)
 	}
 }
 

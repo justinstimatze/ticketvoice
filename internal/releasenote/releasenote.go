@@ -40,7 +40,9 @@ const (
 type Entry struct {
 	Title string // the story's heading; for a minor line, the heading of its section
 	Text  string // summary and body for a story, the line itself for a minor entry
-	Minor bool
+	// Summary is a story's first line, the one under its area; empty for a minor entry.
+	Summary string
+	Minor   bool
 }
 
 // Result is what a check found. NotRun names each scorer that could not run, so a missing binary
@@ -93,7 +95,7 @@ func Entries(note string) []Entry {
 			story = nil
 		}
 		if len(story) > 0 && title != MinorHeading {
-			out = append(out, Entry{Title: title, Text: strings.Join(story, " ")})
+			out = append(out, Entry{Title: title, Text: strings.Join(story, " "), Summary: story[0]})
 		}
 	}
 	return out
@@ -112,6 +114,84 @@ func BudgetFlags(entries []Entry) []string {
 		}
 	}
 	return flags
+}
+
+// A body sentence restates its story's summary when at least RestateShare of its content words
+// are already in the summary, and at least RestateMin of them are. The floor keeps a short
+// sentence that shares one name with the summary ("It works in Alpha.") from counting.
+const (
+	RestateShare = 0.6
+	RestateMin   = 3
+)
+
+var (
+	sentenceEnd = regexp.MustCompile(`([.!?])\s+`)
+	wordRe      = regexp.MustCompile(`[\p{L}\p{N}][\p{L}\p{N}.'’-]*[\p{L}\p{N}]|[\p{L}\p{N}]`)
+	// Function words carry no claim, so sharing them says nothing about a repeat.
+	stopwords = map[string]bool{}
+)
+
+func init() {
+	for _, w := range strings.Fields(`a an and are as at be by can each for from has have in is it its
+		now of on or so that the their them then there this to under up was we were when which who will
+		with you your`) {
+		stopwords[w] = true
+	}
+}
+
+// contentWords lowercases, drops function words and a plural "s", so "answers" and "answer" match.
+func contentWords(s string) []string {
+	var out []string
+	for _, w := range wordRe.FindAllString(strings.ToLower(s), -1) {
+		if stopwords[w] {
+			continue
+		}
+		if len(w) > 3 && strings.HasSuffix(w, "s") && !strings.HasSuffix(w, "ss") {
+			w = w[:len(w)-1]
+		}
+		out = append(out, w)
+	}
+	return out
+}
+
+// RestateFlags names every story body sentence that says again what the summary already said. A
+// story has room for its summary and two or three sentences; one spent repeating the summary
+// leaves the reader with less, and reads as padding beside entries that didn't repeat themselves.
+func RestateFlags(entries []Entry) []string {
+	var flags []string
+	for _, e := range entries {
+		if e.Minor || e.Summary == "" {
+			continue
+		}
+		have := wordSet(e.Summary)
+		body := strings.TrimSpace(strings.TrimPrefix(e.Text, e.Summary))
+		for _, sent := range strings.Split(sentenceEnd.ReplaceAllString(body, "$1\n"), "\n") {
+			if restates(sent, have) {
+				flags = append(flags, fmt.Sprintf("restate: story %q says again in its body what its summary says (%q); cut the sentence or say what the summary left out", e.Title, clip(strings.TrimSpace(sent), 80)))
+			}
+		}
+	}
+	return flags
+}
+
+func wordSet(s string) map[string]bool {
+	set := map[string]bool{}
+	for _, w := range contentWords(s) {
+		set[w] = true
+	}
+	return set
+}
+
+// restates reports whether enough of sent's content words are already in have.
+func restates(sent string, have map[string]bool) bool {
+	words := contentWords(sent)
+	shared := 0
+	for _, w := range words {
+		if have[w] {
+			shared++
+		}
+	}
+	return shared >= RestateMin && float64(shared) >= RestateShare*float64(len(words))
 }
 
 // Runner runs a scorer: its name, its arguments, and the file it reads. Tests replace it.
@@ -135,7 +215,8 @@ func Check(path string, run Runner) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	res := Result{Flags: BudgetFlags(Entries(string(data))), NotRun: []string{}}
+	entries := Entries(string(data))
+	res := Result{Flags: append(BudgetFlags(entries), RestateFlags(entries)...), NotRun: []string{}}
 
 	dir, err := os.MkdirTemp("", "ticketvoice-release-note-")
 	if err != nil {

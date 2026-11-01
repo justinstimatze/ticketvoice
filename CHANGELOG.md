@@ -1,5 +1,14 @@
 # Changelog
 
+## A release note gets a check of its own — 2026-11-01
+
+`ticketvoice --check <file> -field release-note [-json]` checks a product release note: a word
+budget per entry (story 90, minor line 30), a story body sentence that repeats its summary (at
+least three of its content words, and 60% of them, already in the summary), `cope-gate` with the
+embedded `release_note.effigy` card, and `basanite`. Run over 58 published notes, the repeat check
+raised 19 flags across 193 entries; of six read, five repeated the summary and one added a host
+name the summary left out.
+
 ## A ticket named in a reply must have been read since the last compaction — 2026-10-06
 
 `ticketvoice stop` also holds a turn whose text names a ticket id with no full read since the
