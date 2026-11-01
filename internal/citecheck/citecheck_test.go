@@ -307,3 +307,46 @@ func TestJudgeSHAMissingSuggestsFetch(t *testing.T) {
 		t.Fatalf("no fetch hint when every SHA exists, got %q", j.Note)
 	}
 }
+
+// Real case, 2026-10-07: the mayor checkout sat on a stale branch, and a comment citing
+// web/e2e/scenarios/two-tabs-one-conversation.spec.ts, merged to origin/develop that evening, was
+// flagged as nonexistent. A path on a remote branch is real even when this checkout lacks it.
+func TestJudgeFileLineCleanWhenOnlyOnARemoteBranch(t *testing.T) {
+	dir := setupGitRepoWithFile(t, "README.md", "x\n")
+	run := func(args ...string) string {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t.com", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t.com")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	base := run("rev-parse", "HEAD")
+	run("checkout", "-q", "-b", "feature")
+	full := filepath.Join(dir, "web/e2e/new.spec.ts")
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte("a\nb\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "web/e2e/new.spec.ts")
+	run("commit", "-q", "-m", "add spec")
+	run("update-ref", "refs/remotes/origin/develop", run("rev-parse", "HEAD"))
+	run("checkout", "-q", base)
+
+	j, _ := Judge(context.Background(), nil, dir, "See `web/e2e/new.spec.ts:2`.")
+	if j.Flagged {
+		t.Fatalf("a path present on origin/develop must not be called nonexistent, got %s", j.Note)
+	}
+	j, _ = Judge(context.Background(), nil, dir, "See `web/e2e/new.spec.ts:90`.")
+	if !j.Flagged || !strings.Contains(j.Note, "2 lines") {
+		t.Fatalf("a branch-only file must still have its line number checked, got %+v", j)
+	}
+	j, _ = Judge(context.Background(), nil, dir, "See `web/e2e/made-up.spec.ts:2`.")
+	if !j.Flagged || !strings.Contains(j.Note, "doesn't exist") {
+		t.Fatalf("a path on no branch must still be flagged, got %+v", j)
+	}
+}

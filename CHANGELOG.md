@@ -1,5 +1,17 @@
 # Changelog
 
+## A ticket named in a reply must have been read since the last compaction — 2026-10-06
+
+`ticketvoice stop` also holds a turn whose text names a ticket id with no full read since the
+newest compaction boundary in the transcript. A full read is a `get_issue` from linear-strict,
+linear-official or linear-full, a `ticket-facts` run naming the id, or a `create_issue` whose
+result carries it. A list or search result doesn't count. The block names every stale id and the
+one batch command that refreshes them, and a turn already held once is let go, so an id that can't
+be read never loops. Keys come from `TICKETVOICE_FRESH_KEYS` (default `CUR`; empty turns it off).
+Replayed on jupiter's transcript up to its 2026-10-06 rerank, it names all 26 ids that reply cited,
+including the parked CUR-2729 it called red and the three finished tickets it listed as open work.
+Only lines after the boundary are decoded: 1.1 s on a 288k-line transcript, down from 7.6 s.
+
 ## A denied write holds the turn until it's rewritten or dropped — 2026-10-06
 
 `ticketvoice stop` is a new `Stop` hook. Auto-rewrite (2026-09-05) existed because an agent
