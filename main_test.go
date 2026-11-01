@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -677,21 +676,6 @@ func TestRunHookFlaggedWriteGetsNoModelProse(t *testing.T) {
 	if *calls != 0 {
 		t.Fatalf("no model call may be made for a flagged write, got %d", *calls)
 	}
-}
-
-// mustGitRepo returns a real, empty git repo's path — enough for citecheck's isGitRepo check to
-// pass so a bogus SHA citation gets confirmed-flagged rather than skipped.
-func mustGitRepo(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	for _, args := range [][]string{{"init", "-q"}} {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	return dir
 }
 
 // runCheck is the dogfooding path — README.md's own Why section, gated as if it were a Linear
