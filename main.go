@@ -43,6 +43,7 @@ import (
 	"github.com/justinstimatze/ticketvoice/internal/ghcmd"
 	"github.com/justinstimatze/ticketvoice/internal/impactline"
 	"github.com/justinstimatze/ticketvoice/internal/linearclient"
+	"github.com/justinstimatze/ticketvoice/internal/releasenote"
 )
 
 var version = "dev"
@@ -717,13 +718,30 @@ func runHook() {
 // slice of prose against the same budget a Linear write would face, as if it were a ticket entry.
 func runCheck(args []string) int {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
-	field := fs.String("field", "issue", `budget to check against: "issue" or "comment"`)
+	field := fs.String("field", "issue", `budget to check against: "issue", "comment" or "release-note"`)
+	asJSON := fs.Bool("json", false, `with -field release-note, print {"flags": [...], "notRun": [...]}`)
+	// Go's flag package stops at the first positional argument, so the file may come before or after
+	// the flags.
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	if fs.NArg() > 1 {
+		file := fs.Arg(0)
+		if err := fs.Parse(fs.Args()[1:]); err != nil {
+			return 2
+		}
+		if fs.NArg() != 0 {
+			fmt.Fprintln(os.Stderr, "usage: ticketvoice --check <file|-> [-field issue|comment|release-note] [-json]")
+			return 2
+		}
+		_ = fs.Parse([]string{file})
+	}
 	if fs.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: ticketvoice --check <file|-> [-field issue|comment]")
+		fmt.Fprintln(os.Stderr, "usage: ticketvoice --check <file|-> [-field issue|comment|release-note] [-json]")
 		return 2
+	}
+	if *field == "release-note" {
+		return runReleaseNoteCheck(fs.Arg(0), *asJSON)
 	}
 
 	kind, budget := "issue description", defaultIssueBudget
@@ -752,6 +770,50 @@ func runCheck(args []string) int {
 	}
 	fmt.Println(reason + "\n\nCut it and check again.")
 	return 1
+}
+
+// runReleaseNoteCheck checks a release note per entry and through cope and basanite (package
+// releasenote). Exit 0 when nothing is flagged, 1 when something is, 2 when the file can't be read.
+// A scorer that could not run is reported but does not by itself fail the check: basanite needs a
+// locally built report and never runs in CI.
+func runReleaseNoteCheck(path string, asJSON bool) int {
+	if path == "-" {
+		f, err := os.CreateTemp("", "ticketvoice-stdin-*.md")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		defer os.Remove(f.Name())
+		_, err = io.Copy(f, os.Stdin)
+		f.Close()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		path = f.Name()
+	}
+	res, err := releasenote.Check(path, releasenote.ExecRunner)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	if asJSON {
+		_ = json.NewEncoder(os.Stdout).Encode(res)
+	} else {
+		for _, f := range res.Flags {
+			fmt.Println(f)
+		}
+		for _, n := range res.NotRun {
+			fmt.Println("not run: " + n)
+		}
+		if len(res.Flags) == 0 {
+			fmt.Printf("%s: no release-note flags.\n", path)
+		}
+	}
+	if len(res.Flags) > 0 {
+		return 1
+	}
+	return 0
 }
 
 // pendingLabel names a denied write for the Stop hook's list, e.g. "comment on CUR-12 (save_comment)".
